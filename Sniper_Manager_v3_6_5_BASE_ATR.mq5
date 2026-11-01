@@ -6,7 +6,7 @@
 //+------------------------------------------------------------------+
 #property strict
 #property version "3.65"
-#property description "3.6.5 BASE ATR / BASE STOP H1-H4 targets + D1 M15 OB reclaim; BASE-STOP-1"
+#property description "3.6.5 BASE ATR / BASE STOP H1-H4 targets + D1 M15 OB reclaim; BASE-STOP-1 / BASE-DETECT-2"
 #include <Trade\Trade.mqh>
 #include <Canvas\Canvas.mqh>
 
@@ -85,6 +85,13 @@ input int OTEReclaimMaxBars = 4; // Including the sweep candle: at most one hour
 input double OTEReclaimMaxDistanceATR = 0.5; // Maximum entry distance above/below D1 .790
 input bool EnableSMC_Sweep = true;
 input bool EnableSMC_Base = true;
+input bool BaseAdaptiveDetection = true; // Closed-bar consolidation model shared by both BASE entry modes
+input int BaseMinBars = 6;
+input int BaseMaxBars = 24;
+input double BaseMaxRangeATR = 4.0; // Full range / ATR known BEFORE the candidate window
+input double BaseMaxEfficiency = 0.35; // Net close movement / total close-to-close path
+input double BaseMinOverlap = 0.55; // Mean overlap of adjacent candle ranges
+input bool BaseDetectionDiagnostics = false; // One result per closed candle, plus one history-warmup message
 input bool BaseUseStopOrders = false; // Alternative to the existing closed-breakout / ATR mode
 enum BASE_TARGET_SCOPE { BASE_TARGET_H1=1, BASE_TARGET_H4=2, BASE_TARGET_H1_H4=3 };
 input BASE_TARGET_SCOPE BaseTargetScope = BASE_TARGET_H1_H4; // Nearest confirmed profitable H1/H4 level
@@ -236,6 +243,11 @@ OTEReclaimState G_OTEReclaim;
 datetime G_OTEContextDay=0;
 double G_OTEContextLow=0,G_OTEContextHigh=0;
 int G_OTEContextDirection=0;
+struct BaseZone {
+   bool valid; int bars; datetime first,last;
+   double high,low,rangeATR,efficiency,overlap;
+};
+datetime G_BaseModelCheckedBar=0,G_BaseModelDataLogBar=0;
 bool G_BaseArmed=false,G_BaseConsumed=false;
 bool G_BaseStopOCOTripped=false;
 double G_BaseHigh=0,G_BaseLow=0;
@@ -305,7 +317,7 @@ void DeleteOrdersByComment(string comment_str);
 //| INITIALIZATION                                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | BASE STOP / EXTREMUM mode available | build OTE-1+BASE-STOP-1");
+   Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | BASE STOP / EXTREMUM mode available | build OTE-1+BASE-STOP-1 / BASE-DETECT-2");
    ResetSignalAudit();
    G_VisualEnabled=!MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_VISUAL_MODE);
    InitVisualNamespace();
@@ -314,6 +326,10 @@ int OnInit() {
       (!MathIsValidNumber(CounterTrendRiskMult) || CounterTrendRiskMult<=0 || CounterTrendRiskMult>1) ||
       OTEReclaimMaxBars<1 || OTEReclaimMaxBars>96 || (EnableSMC_OTE && RequireOTEReclaim && MinSweepPoints<1) ||
       !MathIsValidNumber(OTEReclaimMaxDistanceATR) || OTEReclaimMaxDistanceATR<=0 || OTEReclaimMaxDistanceATR>5 ||
+      BaseMinBars<4 || BaseMaxBars<BaseMinBars || BaseMaxBars>128 ||
+      !MathIsValidNumber(BaseMaxRangeATR) || BaseMaxRangeATR<=0 || BaseMaxRangeATR>20 ||
+      !MathIsValidNumber(BaseMaxEfficiency) || BaseMaxEfficiency<0 || BaseMaxEfficiency>1 ||
+      !MathIsValidNumber(BaseMinOverlap) || BaseMinOverlap<0 || BaseMinOverlap>1 ||
       BaseSwingStrength<1 || BaseSwingStrength>20 || BaseSwingLookback<2*BaseSwingStrength+2 ||
       BaseSwingLookback>2000 || (int)BaseTargetScope<1 || (int)BaseTargetScope>3 || BaseSLBufferPoints<1 || BaseMaxWaitBars<1 ||
       InfoFontSize<8 || InfoFontSize>24 || InfoWidthPercent<30 || InfoWidthPercent>100 || InfoRightMarginPx<0 ||
@@ -1276,6 +1292,83 @@ void CheckEMATouchLive() {
    }
 }
 
+// All rates/ATR inputs are closed bars, newest first. ATR[n] predates the entire n-bar window.
+bool EvaluateBaseWindow(const MqlRates &rates[],const double &atr[],int n,int seconds,
+                        double maxRangeATR,double maxEfficiency,double minOverlap,
+                        BaseZone &zone,string &why) {
+   BaseZone empty={}; zone=empty; why="";
+   if(n<2 || ArraySize(rates)<n || ArraySize(atr)<=n || seconds<=0 || !Positive(atr[n])) {
+      why="DATA"; return false;
+   }
+   zone.bars=n; zone.first=rates[n-1].time; zone.last=rates[0].time;
+   zone.high=rates[0].high; zone.low=rates[0].low;
+   double path=0,overlap=0;
+   for(int k=0;k<n;k++) {
+      if(rates[k].time<=0 || !Positive(rates[k].high) || !Positive(rates[k].low) ||
+         !Positive(rates[k].open) || !Positive(rates[k].close) || rates[k].high<rates[k].low ||
+         rates[k].open<rates[k].low || rates[k].open>rates[k].high ||
+         rates[k].close<rates[k].low || rates[k].close>rates[k].high) { why="INVALID_OHLC"; return false; }
+      zone.high=MathMax(zone.high,rates[k].high); zone.low=MathMin(zone.low,rates[k].low);
+      if(k==0) continue;
+      if(rates[k-1].time-rates[k].time!=seconds) { why="SESSION_GAP"; return false; }
+      path+=MathAbs(rates[k-1].close-rates[k].close);
+      double width=MathMin(rates[k-1].high-rates[k-1].low,rates[k].high-rates[k].low);
+      double intersection=MathMax(0,MathMin(rates[k-1].high,rates[k].high)-MathMax(rates[k-1].low,rates[k].low));
+      if(width>0) overlap+=MathMin(1.0,intersection/width);
+      else if(MathMax(rates[k-1].low,rates[k].low)<=MathMin(rates[k-1].high,rates[k].high)) overlap+=1.0;
+   }
+   if(!MathIsValidNumber(path) || !Positive(zone.high-zone.low)) { why="ZERO_OR_INVALID_RANGE"; return false; }
+   zone.rangeATR=(zone.high-zone.low)/atr[n];
+   zone.efficiency=path>0?MathAbs(rates[0].close-rates[n-1].close)/path:0;
+   zone.overlap=overlap/(n-1);
+   if(zone.rangeATR>maxRangeATR) { why="RANGE_ATR"; return false; }
+   if(zone.efficiency>maxEfficiency) { why="DIRECTIONAL_DRIFT"; return false; }
+   if(zone.overlap<minOverlap) { why="LOW_OVERLAP"; return false; }
+   zone.valid=true; why="CONSOLIDATION"; return true;
+}
+
+bool SelectBaseZone(const MqlRates &rates[],const double &atr[],int minBars,int maxBars,int seconds,
+                    double maxRangeATR,double maxEfficiency,double minOverlap,BaseZone &zone,string &why) {
+   // Prefer the longest eligible window; candidates never use future bars or a breakout candle.
+   for(int n=maxBars;n>=minBars;n--)
+      if(EvaluateBaseWindow(rates,atr,n,seconds,maxRangeATR,maxEfficiency,minOverlap,zone,why)) return true;
+   return false; // Metrics/reason describe the last (minimum-length) candidate, not every rejected window.
+}
+
+bool ReadBaseZone(int shift,BaseZone &zone,string &why,bool &ready) {
+   ready=false;
+   if(shift<1 || !SeriesInfoInteger(_Symbol,_Period,SERIES_SYNCHRONIZED)) { why="HISTORY_NOT_READY"; return false; }
+   MqlRates rates[]; double atr[]; ArraySetAsSeries(rates,true); ArraySetAsSeries(atr,true);
+   if(CopyRates(_Symbol,_Period,shift,BaseMaxBars,rates)!=BaseMaxBars ||
+      CopyBuffer(h_atr,0,shift,BaseMaxBars+1,atr)!=BaseMaxBars+1) { why="HISTORY_NOT_READY"; return false; }
+   for(int k=0;k<=BaseMaxBars;k++) if(!Positive(atr[k])) { why="ATR_NOT_READY"; return false; }
+   ready=true;
+   return SelectBaseZone(rates,atr,BaseMinBars,BaseMaxBars,PeriodSeconds(_Period),
+      BaseMaxRangeATR,BaseMaxEfficiency,BaseMinOverlap,zone,why);
+}
+
+void UpdateBaseZoneModel() {
+   datetime closed=iTime(_Symbol,_Period,1);
+   if(closed<=0 || closed==G_BaseModelCheckedBar) return;
+   BaseZone zone={}; string why=""; bool ready=false;
+   bool found=ReadBaseZone(1,zone,why,ready);
+   if(!ready) {
+      if(BaseDetectionDiagnostics && G_BaseModelDataLogBar!=closed) {
+         G_BaseModelDataLogBar=closed;
+         Print("SN365 BASE DETECT | time=",TimeToString(closed)," | ready=false | reason=",why);
+      }
+      return; // Retry when terminal history arrives, independently of trade-state locks.
+   }
+   G_BaseModelCheckedBar=closed;
+   if(found) DrawR("BaseZone_"+TimeToString(zone.first),zone.first,zone.high,
+      TimeCurrent()+PeriodSeconds()*10,zone.low,clrDarkGray,"BASE");
+   if(BaseDetectionDiagnostics) Print("SN365 BASE DETECT | time=",TimeToString(closed),
+      " | found=",found," | reason=",why," | bars=",zone.bars,
+      " | rangeATR=",DoubleToString(zone.rangeATR,3)," | efficiency=",DoubleToString(zone.efficiency,3),
+      " | overlap=",DoubleToString(zone.overlap,3)," | low=",DoubleToString(zone.low,_Digits),
+      " | high=",DoubleToString(zone.high,_Digits));
+}
+
 bool IsBaseStopModule(string module) {
    return module=="SMC_Base_Stop_B" || module=="SMC_Base_Stop_S" ||
       StringFind(module,"SMC_Base_Stop_B:")==0 || StringFind(module,"SMC_Base_Stop_S:")==0;
@@ -1377,15 +1470,23 @@ void CheckBaseStopSetup() {
    if(!SeriesInfoInteger(_Symbol,_Period,SERIES_SYNCHRONIZED)) return;
    datetime closed=iTime(_Symbol,_Period,1);
    if(closed<=0 || closed==G_BaseCheckedBar) return;
-   double atr[];
-   if(CopyBuffer(h_atr,0,1,1,atr)!=1 || !Positive(atr[0]) || Bars(_Symbol,_Period)<10) return;
-   int hi=iHighest(_Symbol,_Period,MODE_HIGH,8,2),lo=iLowest(_Symbol,_Period,MODE_LOW,8,2);
-   if(hi<0 || lo<0) return;
-   double high=iHigh(_Symbol,_Period,hi),low=iLow(_Symbol,_Period,lo),c1=iClose(_Symbol,_Period,1);
-   if(!Positive(low) || !Positive(high) || high<=low || high-low>=atr[0]*1.5) { G_BaseCheckedBar=closed; return; }
+   double high=0,low=0,c1=iClose(_Symbol,_Period,1);
+   datetime first=0;
+   if(BaseAdaptiveDetection) {
+      BaseZone zone={}; string why=""; bool ready=false;
+      if(!ReadBaseZone(1,zone,why,ready)) { if(ready) G_BaseCheckedBar=closed; return; }
+      high=zone.high; low=zone.low; first=zone.first;
+   } else {
+      double atr[];
+      if(CopyBuffer(h_atr,0,1,1,atr)!=1 || !Positive(atr[0]) || Bars(_Symbol,_Period)<10) return;
+      int hi=iHighest(_Symbol,_Period,MODE_HIGH,8,2),lo=iLowest(_Symbol,_Period,MODE_LOW,8,2);
+      if(hi<0 || lo<0) return;
+      high=iHigh(_Symbol,_Period,hi); low=iLow(_Symbol,_Period,lo);
+      if(!Positive(low) || !Positive(high) || high<=low || high-low>=atr[0]*1.5) { G_BaseCheckedBar=closed; return; }
+      first=iTime(_Symbol,_Period,9);
+      DrawR("BaseZone_"+TimeToString(first),first,high,TimeCurrent()+PeriodSeconds()*10,low,clrDarkGray,"BASE");
+   }
    AuditModuleRead(AUDIT_BASE);
-   datetime first=iTime(_Symbol,_Period,9);
-   DrawR("BaseZone_"+TimeToString(first),first,high,TimeCurrent()+PeriodSeconds()*10,low,clrDarkGray,"BASE");
    if(BaseStopHasPosition()) { G_BaseCheckedBar=closed; G_BaseConsumed=true; CancelBaseStopOrders(); return; }
    if(BaseStopHasPending()) { G_BaseCheckedBar=closed; return; } // Freeze existing order boundaries/targets until execution or expiry.
    G_BaseStopOCOTripped=false;
@@ -1473,27 +1574,38 @@ void CheckBaseBreakout() {
    if(closed<=0 || closed==G_BaseCheckedBar) return;
    double atr[];
    if(CopyBuffer(h_atr,0,1,1,atr)!=1 || !Positive(atr[0])) return;
-   int ih=iHighest(_Symbol,_Period,MODE_HIGH,8,2),il=iLowest(_Symbol,_Period,MODE_LOW,8,2);
-   if(ih<0 || il<0) return;
-   double h8=iHigh(_Symbol,_Period,ih),l8=iLow(_Symbol,_Period,il),c1=iClose(_Symbol,_Period,1);
-   if(!Positive(h8) || !Positive(l8) || !Positive(c1) || h8<=l8) return;
+   double h8=0,l8=0,c1=iClose(_Symbol,_Period,1);
+   datetime first=0; bool narrow=false;
+   if(BaseAdaptiveDetection) {
+      BaseZone zone={}; string why=""; bool ready=false;
+      narrow=ReadBaseZone(2,zone,why,ready); // Exclude the candle that may have just broken the range.
+      if(!ready) return;
+      h8=narrow?zone.high:G_BaseHigh; l8=narrow?zone.low:G_BaseLow;
+      first=narrow?zone.first:G_BaseStarted;
+   } else {
+      int ih=iHighest(_Symbol,_Period,MODE_HIGH,8,2),il=iLowest(_Symbol,_Period,MODE_LOW,8,2);
+      if(ih<0 || il<0) return;
+      h8=iHigh(_Symbol,_Period,ih); l8=iLow(_Symbol,_Period,il);
+      first=iTime(_Symbol,_Period,9); narrow=h8-l8<atr[0]*1.5;
+      if(narrow && Positive(l8) && h8>l8)
+         DrawR("BaseZone_"+TimeToString(first),first,h8,TimeCurrent()+PeriodSeconds()*10,l8,clrDarkGray,"BASE");
+   }
+   if(!Positive(h8) || !Positive(l8) || !Positive(c1) || h8<=l8) { G_BaseCheckedBar=closed; return; }
    G_BaseCheckedBar=closed;
    AuditModuleRead(AUDIT_BASE);
-   bool narrow=(h8-l8<atr[0]*1.5);
-   // Preserve the original BASE geometry, colours, labels and detection window.
-   if(narrow) {
-      string b_name="BaseZone_"+TimeToString(iTime(_Symbol,_Period,9));
-      DrawR(b_name,iTime(_Symbol,_Period,9),h8,TimeCurrent()+PeriodSeconds()*10,l8,clrDarkGray,"BASE");
-   }
    if(G_BaseArmed) {
       int age=iBarShift(_Symbol,_Period,G_BaseArmedBar,true);
       if(age<0 || age>BaseMaxWaitBars) { G_BaseArmed=false; G_BaseConsumed=true; }
+   }
+   if(BaseAdaptiveDetection && G_BaseArmed && narrow) {
+      // The latest complete pre-breakout window is known before candle 1; never use candle 1 to widen it.
+      G_BaseHigh=h8; G_BaseLow=l8; G_BaseStarted=first; G_BaseArmedBar=iTime(_Symbol,_Period,2);
    }
    // Prefer the bounds displayed before this breakout, not a recomputed box containing the impulse.
    if(!G_BaseArmed && narrow && (!G_BaseConsumed || BaseBreakoutSide(c1,l8,h8)<0)) {
       G_BaseArmed=true; G_BaseConsumed=false;
       G_BaseHigh=h8; G_BaseLow=l8;
-      G_BaseStarted=iTime(_Symbol,_Period,9); G_BaseArmedBar=closed;
+      G_BaseStarted=first; G_BaseArmedBar=closed;
    }
    if(!G_BaseArmed) return;
    int side=BaseBreakoutSide(c1,G_BaseLow,G_BaseHigh);
@@ -1501,7 +1613,7 @@ void CheckBaseBreakout() {
       // While still inside, the most recently painted BASE becomes the next reference.
       if(narrow) {
          G_BaseHigh=h8; G_BaseLow=l8;
-         G_BaseStarted=iTime(_Symbol,_Period,9); G_BaseArmedBar=closed;
+         G_BaseStarted=first; G_BaseArmedBar=closed;
       }
       return;
    }
@@ -1893,6 +2005,7 @@ void RefreshMarketContext() {
       drawnEnd=SF_ConfirmedBreak; drawnTime=SF_ConfirmedBreakTime;
    }
    UpdatePreviousDayFibo();
+   if(BaseAdaptiveDetection) UpdateBaseZoneModel(); // Model and drawing never depend on entry permission.
 }
 
 bool OwnFloatingPNL(double &pnl) {

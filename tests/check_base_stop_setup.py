@@ -48,6 +48,14 @@ void setupFixture(){
  for(int i=7;i<64;i++){stopBars.push_back({108-i*.01,103+i*.01});h1.push_back({110-i*.01,98+i*.01});h4.push_back({110-i*.01,103+i*.01});}
 }
 '''
+
+state=s[s.index('struct BaseZone {'):s.index('};',s.index('struct BaseZone {'))+2]
+h+='\n'+state+r'''
+bool BaseAdaptiveDetection=false,adaptiveFound=true,adaptiveReady=true;
+BaseZone adaptiveZone{true,6,900,1000,110,100,2,0.1,0.8};
+int adaptiveShift=0;
+bool ReadBaseZone(int shift,BaseZone& zone,string&,bool& ready){adaptiveShift=shift;zone=adaptiveZone;ready=adaptiveReady;return adaptiveFound;}
+'''
 funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','BaseBreakoutSide','BaseSwingStop','BaseExtremumTarget','BaseATRTarget','GetBaseStopTarget','SubmitEntry','CheckBaseStopSetup'))
 funcs=funcs.replace('const MqlRates &bars[]','const std::vector<MqlRates> &bars')
 for name in ('rates','stops'):
@@ -69,6 +77,9 @@ int main(){
  setupFixture();EnableAutoTrade=false;CheckBaseStopSetup();assert(book.empty());
  setupFixture();positionOpen=true;CheckBaseStopSetup();assert(book.empty() && canceled==1);
  setupFixture();riskBefore=49;CheckBaseStopSetup();assert(book.empty()); // shared exposure budget blocks both
+ setupFixture();BaseAdaptiveDetection=true;adaptiveZone.high=108;adaptiveZone.low=102;
+ CheckBaseStopSetup();assert(adaptiveShift==1 && book.size()==2 && book[0].price==108 && book[1].price==102);
+ setupFixture();adaptiveFound=false;CheckBaseStopSetup();assert(book.empty());
  std::cout<<"PASS: actual BASE setup + H1/H4 nearest target + broker requests; two sides, directional gates, no chase/duplicates, incomplete history and diagnostic mode\n";
 }
 '''

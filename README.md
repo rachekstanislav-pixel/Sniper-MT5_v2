@@ -2,6 +2,7 @@
 
 Полная автономная рабочая версия советника MetaTrader 5 на базе 3.6.5 VISUAL_AUDIT. Алгоритм 3.6.6 не переносился.
 
+- Общий адаптивный детектор BASE: окна 6–24 свечи, диапазон/ATR, направленность и перекрытие. [Правила и A/B-проверка](BASE_DETECTION.md).
 - BASE поддерживает два режима: прежний вход после закрытия за зоной с ATR-тейком и новые Buy Stop/Sell Stop на границах с целью у ближайшего подтверждённого экстремума H1/H4. [Правила Stop-режима](BASE_STOP.md).
 - SL за последним подтверждённым локальным экстремумом.
 - В ATR-режиме TP от фактического входа на расстоянии 2 × ATR, с пересчётом по закрытым свечам; в Stop-режиме TP фиксируется у подтверждённого H1/H4-экстремума.
@@ -21,6 +22,10 @@
 `Sniper_v3_6_5_BASE_STOP_ONLY_TEST.set` — новый Stop-режим BASE без других модулей.
 `Sniper_v3_6_5_BASE_STOP_NO_EMA.set` — общий набор с новым Stop-режимом и новым OTE, без EMA.
 В прежних SET параметр `BaseUseStopOrders` отсутствует: сохраняется прежний режим (`false`).
+`Sniper_v3_6_5_BASE_ADAPTIVE_ONLY_TEST.set` — адаптивный BASE Stop с диагностикой.
+`Sniper_v3_6_5_BASE_ADAPTIVE_NO_EMA.set` — общий набор с адаптивным BASE.
+`Sniper_v3_6_5_BASE_LEGACY_ONLY_TEST.set` — контроль прежнего детектора для A/B.
+Старые SET без `BaseAdaptiveDetection` используют новое значение по умолчанию true; false явно включает старый детектор.
 `baseline/` — исходные вложения до правок, для регрессионных проверок.
 Подробности поведения и ограничений: [BASE_ATR_REVIEW.md](BASE_ATR_REVIEW.md).
 
@@ -43,6 +48,7 @@ python3 tests/check_ote_reclaim.py
 python3 tests/check_base_stop_orders.py
 python3 tests/check_base_stop_setup.py
 python3 tests/check_base_stop_oco.py
+python3 tests/check_base_detection.py
 ```
 
 Тесты исполняют реальные извлечённые функции как C++ с имитацией MT5 API. Это не компиляция MQL5 и не прогон Strategy Tester. EX5 не включён: MetaEditor/MT5 в облачной среде отсутствуют.

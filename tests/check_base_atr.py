@@ -3,6 +3,14 @@ from pathlib import Path
 import runpy, subprocess, tempfile
 ctx=runpy.run_path(str(Path(__file__).with_name('check_working_revision.py')))
 s,extract=ctx['s'],ctx['function']
+
+state=s[s.index('struct BaseZone {'):s.index('};',s.index('struct BaseZone {'))+2]
+_adaptive_h='\n'+state+r'''
+bool BaseAdaptiveDetection=false,adaptiveFound=true,adaptiveReady=true;
+BaseZone adaptiveZone{true,6,900,1000,110,100,2,0.1,0.8};
+int adaptiveShift=0;
+bool ReadBaseZone(int shift,BaseZone& zone,string&,bool& ready){adaptiveShift=shift;zone=adaptiveZone;ready=adaptiveReady;return adaptiveFound;}
+'''
 functions='\n'.join(extract(s,n) for n in ('BaseBreakoutSide','BaseSwingStop','BaseATRTarget','CheckBaseBreakout'))
 functions=functions.replace('const MqlRates &bars[]','const std::vector<MqlRates> &bars').replace('double atr[];','std::vector<double> atr;').replace('MqlRates rates[];','std::vector<MqlRates> rates;')
 h=ctx['harness']
@@ -46,6 +54,7 @@ void fixture(){
 }
 void breakout(){closedBar=101;rangeHigh=140;rangeLow=90;closePrice=98;ask=98;bid=97;}
 '''
+h+=_adaptive_h
 cases=r'''
 int main(){
  assert(BaseBreakoutSide(99,100,110)==POSITION_TYPE_SELL);
@@ -70,6 +79,14 @@ int main(){
  fixture();CheckBaseBreakout();closedBar=101;closePrice=112;rangeHigh=140;rangeLow=90;ask=113;bid=112;
  for(auto& bar:market){double high=210-bar.low;bar.low=210-bar.high;bar.high=high;}
  CheckBaseBreakout();assert(successful==1 && lastSide==POSITION_TYPE_BUY && std::abs(lastSL-98.85)<1e-9);
+ // Adaptive market entries use a window excluding the just-closed breakout candle.
+ fixture();BaseAdaptiveDetection=true;closedBar=101;adaptiveZone.first=90;adaptiveZone.last=100;closePrice=112;ask=113;bid=112;
+ CheckBaseBreakout();assert(adaptiveShift==2 && successful==1 && lastSide==POSITION_TYPE_BUY);
+ fixture();G_BaseArmed=true;G_BaseHigh=108;G_BaseLow=100;G_BaseArmedBar=100;closedBar=101;
+ closePrice=109;ask=109.2;bid=109;CheckBaseBreakout();assert(successful==0 && G_BaseHigh==110); // use latest pre-break bounds, not an older narrower box
+ fixture();G_BaseArmed=true;G_BaseHigh=110;G_BaseLow=100;G_BaseArmedBar=100;closedBar=101;adaptiveFound=false;
+ closePrice=112;ask=113;bid=112;CheckBaseBreakout();assert(successful==1); // existing valid base survives a failed fresh candidate
+ adaptiveFound=true;BaseAdaptiveDetection=false;
  // A more recent unconfirmed pivot cannot replace the most recent confirmed pivot.
  fixture();double sl=0;market[0].high=109;market[1].high=110;
  assert(BaseSwingStop(market,POSITION_TYPE_SELL,2,0.15,sl));assert(std::abs(sl-111.15)<1e-9);
