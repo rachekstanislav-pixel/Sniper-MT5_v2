@@ -1,12 +1,12 @@
 """Compile actual stop request and pivot target code with a deterministic fake broker."""
 from pathlib import Path
 import re,subprocess,tempfile
-r=Path(__file__).resolve().parents[1];s=(r/'Sniper_Manager_v3_6_5_BASE_DETECT_2.mq5').read_text()
+r=Path(__file__).resolve().parents[1];s=(r/'Sniper_Manager_v3_6_5_M5_BASE_OTE_FIX_1.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:bool|string|void|double|int) '+name+r'\([^{};]*\)\s*\{',s,re.M)
  assert m,name
  return s[m.start():s.index('\n}',m.end())+2]
-funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','IsIndividualBaseModule','BaseExtremumTarget','BaseATRTarget','SubmitEntry'))
+funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','IsIndividualBaseModule','BaseExtremumTarget','BaseATRTarget','LogPortfolioBlock','LogEntrySizeFailure','SubmitEntry'))
 funcs=funcs.replace('const MqlRates &bars[]','const std::vector<MqlRates> &bars')
 h=r'''
 #include <cmath>
@@ -34,8 +34,9 @@ template<typename T>int ArraySize(const std::vector<T>& a){return (int)a.size();
 struct MqlRates{double high,low;};
 struct MqlTick{double bid,ask;};
 struct MqlTradeRequest{int action=0,type=0,symbol=0,type_time=0,type_filling=0,deviation=0;ulong magic=0;double volume=0,price=0,sl=0,tp=0,stoplimit=0;string comment;datetime expiration=0;};
-struct MqlTradeCheckResult{int retcode=0;};
+struct MqlTradeCheckResult{int retcode=0;string comment;};
 double balanceValue=1000;
+string G_BaseEntryStatus="",G_OTEEntryStatus="";
 MqlTradeRequest checked,sent;double quoteBid=104,quoteAsk=105,riskBefore=0,buyBefore=0,sellBefore=0,marginBefore=0;
 long allowedModes=SYMBOL_ORDER_STOP|SYMBOL_ORDER_STOP_LIMIT;bool policy=true,checkOK=true,sendOK=true,visible=true,canSave=true,exposureOK=true;
 int saves=0,network=0;string reason;
@@ -51,7 +52,7 @@ bool SafeVolume(int,double,double,double& v,double mult){v=.1*mult;return true;}
 bool OwnExposure(double& risk,double& bv,double& sv,double& margin){risk=riskBefore;bv=buyBefore;sv=sellBefore;margin=marginBefore;return exposureOK;}
 bool LossAtSL(int,double vol,double entry,double sl,double& loss){loss=vol*std::abs(entry-sl)*10;return true;}
 double AccountInfoDouble(int prop){return prop==ACCOUNT_BALANCE?balanceValue:500;}
-double GetDynamicGlobalRisk(){return 5;}
+double GetDynamicGlobalRisk(){return 5;}double GetDynamicRisk(){return 2;}
 bool OrderCalcMargin(int,int,double v,double,double& m){m=v*100;return true;}
 bool OrderCheck(const MqlTradeRequest& r,MqlTradeCheckResult& check){checked=r;check.retcode=0;return checkOK;}
 string IntegerToString(long x){return std::to_string(x);}string DoubleToString(double x,int){return std::to_string(x);}
@@ -100,6 +101,8 @@ int main(){
  fixture();assert(!SubmitEntry(0,true,110,100,"SMC_Base_Stop_B:100",0,2,120) && network==0); // unsupported stop-limit mode
  fixture();balanceValue=118.83;assert(SubmitEntry(0,true,110,100,"SMC_Base_Stop_B:100",0,1,120));assert(sent.volume==.01); // reduce to valid cap, preserve cash risk
  fixture();buyBefore=.06;assert(SubmitEntry(0,true,110,100,"SMC_Base_Stop_B:100",0,1,120));assert(sent.volume<=.04); // only remaining volume
+ fixture();balanceValue=100;LogEntrySizeFailure("SMC_OTE_Reclaim",0,110,90,.5);
+ assert(reason.find("MIN_LOT_RISK")!=string::npos && network==0 && saves==0); // diagnostics cannot force an unaffordable trade
  // Most recent pivot is 120; nearest by price is older 115. Unconfirmed first/last samples are excluded.
  std::vector<MqlRates> bars={{130,90},{110,95},{120,96},{110,97},{108,94},{115,95},{109,96},{108,97}};
  assert(BaseExtremumTarget(bars,0,1,111,false)==115);

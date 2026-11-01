@@ -1,7 +1,7 @@
 """Actual D1/M15/OB state machine and orchestration, compiled with MT5 API doubles."""
 from pathlib import Path
 import re,subprocess,tempfile
-r=Path(__file__).resolve().parents[1];s=(r/'Sniper_Manager_v3_6_5_BASE_DETECT_2.mq5').read_text()
+r=Path(__file__).resolve().parents[1];s=(r/'Sniper_Manager_v3_6_5_M5_BASE_OTE_FIX_1.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:bool|void|int) '+name+r'\([^{};]*\)\s*\{',s,re.M)
  assert m,name
@@ -37,6 +37,7 @@ std::vector<MqlRates> m15,h4rates,prior;
 double atrValue=2,quoteBid=105,quoteAsk=105.1;
 bool historyOK=true,atrOK=true,submissionAllowed=true;
 int submissions=0,accepted=0,lastSide=-1;
+string G_OTEEntryStatus="";
 string lastReason;
 bool SeriesInfoInteger(int,int,int){return historyOK;}
 int CopyBuffer(int,int,int shift,int,std::vector<double>& a){assert(shift==1);a={atrValue};return atrOK?1:0;}

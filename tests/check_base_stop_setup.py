@@ -1,13 +1,13 @@
 """Execute the actual BASE setup, H1/H4 target choice and stop submission together."""
 from pathlib import Path
 import ast,re,subprocess,tempfile
-root=Path(__file__).resolve().parents[1];s=(root/'Sniper_Manager_v3_6_5_BASE_DETECT_2.mq5').read_text()
+root=Path(__file__).resolve().parents[1];s=(root/'Sniper_Manager_v3_6_5_M5_BASE_OTE_FIX_1.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:bool|string|void|double|int) '+name+r'\([^{};]*\)\s*\{',s,re.M);assert m,name
  return s[m.start():s.index('\n}',m.end())+2]
 tree=ast.parse(Path(__file__).with_name('check_base_stop_orders.py').read_text())
 h=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='h' for t in n.targets))
-h=h.replace('struct MqlTradeCheckResult{int retcode=0;};','struct MqlTradeCheckResult{int retcode=0;};\nstd::vector<MqlTradeRequest> book;')
+h=h.replace('MqlTradeRequest checked,sent;','std::vector<MqlTradeRequest> book;\nMqlTradeRequest checked,sent;')
 h=h.replace('bool EntryPolicy(int,string,bool,bool){return policy && !G_ExecutionUncertain && G_StateOK;}', 'int onlySide=-1;bool EntryPolicy(int side,string,bool,bool){return policy && (onlySide<0||side==onlySide) && !G_ExecutionUncertain && G_StateOK;}')
 h=h.replace('datetime TimeCurrent(){return 1000;}', 'datetime now=100000;datetime TimeCurrent(){return now;}')
 h=h.replace('bool IsOwnOrder(ulong x){return visible && x==123;}', 'bool IsOwnOrder(ulong x){return visible && x>=123 && x<123+book.size();}')
@@ -56,7 +56,7 @@ BaseZone adaptiveZone{true,6,900,1000,110,100,2,0.1,0.8};
 int adaptiveShift=0;
 bool ReadBaseZone(int shift,BaseZone& zone,string&,bool& ready){adaptiveShift=shift;zone=adaptiveZone;ready=adaptiveReady;return adaptiveFound;}
 '''
-funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','BaseBreakoutSide','BaseSwingStop','BaseExtremumTarget','BaseATRTarget','GetBaseStopTarget','SubmitEntry','CheckBaseStopSetup'))
+funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','BaseBreakoutSide','BaseSwingStop','BaseExtremumTarget','BaseATRTarget','GetBaseStopTarget','LogPortfolioBlock','LogEntrySizeFailure','SubmitEntry','CheckBaseStopSetup'))
 funcs=funcs.replace('const MqlRates &bars[]','const std::vector<MqlRates> &bars')
 for name in ('rates','stops'):
  funcs=funcs.replace('MqlRates '+name+'[];', 'std::vector<MqlRates> '+name+';')

@@ -1,4 +1,6 @@
-# Sniper Manager 3.6.5 BASE DETECT 2
+# Sniper Manager 3.6.5 M5 BASE / OTE FIX 1
+
+Последняя сборка: **`Sniper_Manager_v3_6_5_M5_BASE_OTE_FIX_1.mq5`**, только M5; отдельный SET не требуется. Все шесть модулей включены в исходнике. [Разбор журналов и ограничения проверки](M5_LOG_REVIEW.md).
 
 Полная автономная рабочая версия советника MetaTrader 5 на базе 3.6.5 VISUAL_AUDIT. Алгоритм 3.6.6 не переносился.
 
@@ -12,7 +14,8 @@
 
 ## Файлы
 
-`Sniper_Manager_v3_6_5_BASE_DETECT_2.mq5` — полный исходник; дополнительные модули проекта не нужны.
+`Sniper_Manager_v3_6_5_M5_BASE_OTE_FIX_1.mq5` — полный исходник; дополнительные модули проекта не нужны.
+`Sniper_Manager_v3_6_5_BASE_DETECT_2.mq5` — сохранённый предыдущий вариант адаптивного детектора.
 `Sniper_Manager_v3_6_5_BASE_ATR.mq5` — сохранённая предыдущая версия (BASE-STOP-1, коммит 690fd23), для сравнения.
 Стандартные библиотеки MT5: `Trade/Trade.mqh`, `Canvas/Canvas.mqh`.
 `Sniper_v3_6_5_BASE_ATR_NO_EMA.set` — рабочие настройки.
@@ -50,6 +53,8 @@ python3 tests/check_base_stop_orders.py
 python3 tests/check_base_stop_setup.py
 python3 tests/check_base_stop_oco.py
 python3 tests/check_base_detection.py
+python3 tests/check_mixed_module_exposure.py
+python3 tests/check_reported_cash_risk.py
 ```
 
 Тесты исполняют реальные извлечённые функции как C++ с имитацией MT5 API. Это не компиляция MQL5 и не прогон Strategy Tester. EX5 не включён: MetaEditor/MT5 в облачной среде отсутствуют.
