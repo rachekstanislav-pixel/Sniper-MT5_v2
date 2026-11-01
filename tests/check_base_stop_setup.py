@@ -1,7 +1,7 @@
 """Execute the actual BASE setup, H1/H4 target choice and stop submission together."""
 from pathlib import Path
 import ast,re,subprocess,tempfile
-root=Path(__file__).resolve().parents[1];s=(root/'Sniper_Manager_v3_6_5_M5_ALL_MODULES_V3.mq5').read_text()
+root=Path(__file__).resolve().parents[1];s=(root/'Sniper_Manager_v3_6_5_RESTORED_STOP_FIX.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:bool|string|void|double|int) '+name+r'\([^{};]*\)\s*\{',s,re.M);assert m,name
  return s[m.start():s.index('\n}',m.end())+2]
@@ -56,7 +56,7 @@ BaseZone adaptiveZone{true,6,900,1000,110,100,2,0.1,0.8};
 int adaptiveShift=0;
 bool ReadBaseZone(int shift,BaseZone& zone,string&,bool& ready){adaptiveShift=shift;zone=adaptiveZone;ready=adaptiveReady;return adaptiveFound;}
 '''
-funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','BaseBreakoutSide','BaseSwingStop','BaseExtremumTarget','BaseATRTarget','GetBaseStopTarget','LogPortfolioBlock','LogEntrySizeFailure','SubmitEntry','CheckBaseStopSetup'))
+funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','BaseBreakoutSide','BaseSwingStop','BaseExtremumTarget','BaseATRTarget','GetBaseStopTarget','LogEntrySizeFailure','SubmitEntry','CheckBaseStopSetup'))
 funcs=funcs.replace('const MqlRates &bars[]','const std::vector<MqlRates> &bars')
 for name in ('rates','stops'):
  funcs=funcs.replace('MqlRates '+name+'[];', 'std::vector<MqlRates> '+name+';')

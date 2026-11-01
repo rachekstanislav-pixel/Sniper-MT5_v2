@@ -4,7 +4,7 @@ that distance is unaffordable. This is not a historical tick replay.
 """
 from pathlib import Path
 import ast,re,subprocess,tempfile
-s=(Path(__file__).resolve().parents[1]/'Sniper_Manager_v3_6_5_M5_ALL_MODULES_V3.mq5').read_text()
+s=(Path(__file__).resolve().parents[1]/'Sniper_Manager_v3_6_5_RESTORED_STOP_FIX.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:bool|double) '+name+r'\([^{};]*\)\s*\{',s,re.M);assert m
  return s[m.start():s.index('\n}',m.end())+2]

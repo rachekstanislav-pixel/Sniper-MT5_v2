@@ -2,7 +2,7 @@
 from pathlib import Path
 import re,subprocess,tempfile
 r=Path(__file__).resolve().parents[1]
-s=(r/'Sniper_Manager_v3_6_5_M5_ALL_MODULES_V3.mq5').read_text()
+s=(r/'Sniper_Manager_v3_6_5_RESTORED_STOP_FIX.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:void|double|bool) '+name+r'\([^{};]*\)\s*\{',s,re.M)
  return s[m.start():s.index('\n}',m.end())+2]

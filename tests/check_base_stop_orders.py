@@ -1,12 +1,12 @@
 """Compile actual stop request and pivot target code with a deterministic fake broker."""
 from pathlib import Path
 import re,subprocess,tempfile
-r=Path(__file__).resolve().parents[1];s=(r/'Sniper_Manager_v3_6_5_M5_ALL_MODULES_V3.mq5').read_text()
+r=Path(__file__).resolve().parents[1];s=(r/'Sniper_Manager_v3_6_5_RESTORED_STOP_FIX.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:bool|string|void|double|int) '+name+r'\([^{};]*\)\s*\{',s,re.M)
  assert m,name
  return s[m.start():s.index('\n}',m.end())+2]
-funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','IsIndividualBaseModule','BaseExtremumTarget','BaseATRTarget','LogPortfolioBlock','LogEntrySizeFailure','SubmitEntry'))
+funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','IsIndividualBaseModule','BaseExtremumTarget','BaseATRTarget','LogEntrySizeFailure','SubmitEntry'))
 funcs=funcs.replace('const MqlRates &bars[]','const std::vector<MqlRates> &bars')
 h=r'''
 #include <cmath>
