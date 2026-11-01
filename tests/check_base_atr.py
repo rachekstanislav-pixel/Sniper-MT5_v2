@@ -14,6 +14,7 @@ h=h[:a]+'''int lastSide=-1;double lastSL=0,lastATR=0;
 bool SubmitEntry(int side,bool,double,double sl,string,double atr){attempts++;if(!gate)return false;successful++;lastSide=side;lastSL=sl;lastATR=atr;return true;}
 '''+h[b:]
 h+=r'''
+bool BaseUseStopOrders=false;void CheckBaseStopSetup(){assert(false);}
 #include <sstream>
 constexpr int AUDIT_BASE=4,clrDarkGray=0;
 bool G_BaseArmed=false,G_BaseConsumed=false,EnableSMC_Base=true,BaseRequireVolumeSpike=false;
@@ -92,6 +93,6 @@ assert 'trade.Buy(volume,_Symbol,entry,sl,tp,comment)' in submit
 assert 'trade.Sell(volume,_Symbol,entry,sl,tp,comment)' in submit
 # Existing basket close and BE loops must exclude new ATR positions.
 manager=extract(s,'ManagePositions')
-assert manager.count('PositionGetString(POSITION_COMMENT)!="SMC_Base_ATR"')==4
-assert 'if(PositionGetString(POSITION_COMMENT)=="SMC_Base_ATR") continue;' in manager
+assert manager.count('!IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))')==4
+assert 'if(IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) continue;' in manager
 print('PASS: ATR TP submission and legacy basket isolation checks')

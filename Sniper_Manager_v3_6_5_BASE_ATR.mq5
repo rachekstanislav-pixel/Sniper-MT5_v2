@@ -6,7 +6,7 @@
 //+------------------------------------------------------------------+
 #property strict
 #property version "3.65"
-#property description "3.6.5 BASE ATR + D1 .790 / M15 OB reclaim; build OTE-1"
+#property description "3.6.5 BASE ATR / BASE STOP H1-H4 targets + D1 M15 OB reclaim; BASE-STOP-1"
 #include <Trade\Trade.mqh>
 #include <Canvas\Canvas.mqh>
 
@@ -85,6 +85,9 @@ input int OTEReclaimMaxBars = 4; // Including the sweep candle: at most one hour
 input double OTEReclaimMaxDistanceATR = 0.5; // Maximum entry distance above/below D1 .790
 input bool EnableSMC_Sweep = true;
 input bool EnableSMC_Base = true;
+input bool BaseUseStopOrders = false; // Alternative to the existing closed-breakout / ATR mode
+enum BASE_TARGET_SCOPE { BASE_TARGET_H1=1, BASE_TARGET_H4=2, BASE_TARGET_H1_H4=3 };
+input BASE_TARGET_SCOPE BaseTargetScope = BASE_TARGET_H1_H4; // Nearest confirmed profitable H1/H4 level
 input bool BaseRequireVolumeSpike = false; // Closed breakout is sufficient; optional old volume filter
 input int BaseSwingStrength = 2; // Confirmed local pivot: closed bars on each side
 input int BaseSwingLookback = 64;
@@ -234,6 +237,7 @@ datetime G_OTEContextDay=0;
 double G_OTEContextLow=0,G_OTEContextHigh=0;
 int G_OTEContextDirection=0;
 bool G_BaseArmed=false,G_BaseConsumed=false;
+bool G_BaseStopOCOTripped=false;
 double G_BaseHigh=0,G_BaseLow=0;
 datetime G_BaseStarted=0,G_BaseArmedBar=0,G_BaseCheckedBar=0;
 string G_StructureStatus="";
@@ -301,7 +305,7 @@ void DeleteOrdersByComment(string comment_str);
 //| INITIALIZATION                                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | build OTE-1");
+   Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | BASE STOP / EXTREMUM mode available | build OTE-1+BASE-STOP-1");
    ResetSignalAudit();
    G_VisualEnabled=!MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_VISUAL_MODE);
    InitVisualNamespace();
@@ -311,7 +315,7 @@ int OnInit() {
       OTEReclaimMaxBars<1 || OTEReclaimMaxBars>96 || (EnableSMC_OTE && RequireOTEReclaim && MinSweepPoints<1) ||
       !MathIsValidNumber(OTEReclaimMaxDistanceATR) || OTEReclaimMaxDistanceATR<=0 || OTEReclaimMaxDistanceATR>5 ||
       BaseSwingStrength<1 || BaseSwingStrength>20 || BaseSwingLookback<2*BaseSwingStrength+2 ||
-      BaseSwingLookback>2000 || BaseSLBufferPoints<1 || BaseMaxWaitBars<1 ||
+      BaseSwingLookback>2000 || (int)BaseTargetScope<1 || (int)BaseTargetScope>3 || BaseSLBufferPoints<1 || BaseMaxWaitBars<1 ||
       InfoFontSize<8 || InfoFontSize>24 || InfoWidthPercent<30 || InfoWidthPercent>100 || InfoRightMarginPx<0 ||
       HudBackgroundTransparency<0 || HudBackgroundTransparency>100 || HudFontSize<8 || HudFontSize>18 || HudTopOffsetPx<8 || StringLen(HudFontName)==0 || MaxVisualHistory<16 || MaxVisualHistory>5000)
       return INIT_PARAMETERS_INCORRECT;
@@ -361,7 +365,7 @@ int OnInit() {
          h_mtf_ema21[i]==INVALID_HANDLE || h_mtf_ema55[i]==INVALID_HANDLE || h_mtf_ema200[i]==INVALID_HANDLE)
          return INIT_FAILED;
    RefreshMarketContext();
-   G_BaseCheckedBar=iTime(_Symbol,_Period,1); // No retrospective entry when attached.
+   G_BaseCheckedBar=BaseUseStopOrders?0:iTime(_Symbol,_Period,1); // Pending mode may arm a live inside-range quote immediately.
    G_OTEReclaimCheckedBar=iTime(_Symbol,PERIOD_M15,1); // Never replay a historical entry on attachment.
    ServiceVisuals(true);
    return INIT_SUCCEEDED;
@@ -384,7 +388,7 @@ void OnDeinit(const int reason) {
    PrintSignalAudit();
 }
 
-// Own deal ledger for the next regression run. No trade mutations, no GUI access.
+// Own deal ledger. Own BASE Stop entry fills persist cooldown and cancel sibling pending orders.
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result) {
    if(trans.type!=TRADE_TRANSACTION_DEAL_ADD || trans.deal==0) return;
    if(!HistoryDealSelect(trans.deal)) { SafetyLog("deal ledger: HistoryDealSelect unavailable"); return; }
@@ -400,12 +404,29 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       " | swap=",DoubleToString(HistoryDealGetDouble(trans.deal,DEAL_SWAP),2),
       " | fee=",DoubleToString(HistoryDealGetDouble(trans.deal,DEAL_FEE),2),
       " | reason=",HistoryDealGetInteger(trans.deal,DEAL_REASON)," | comment=",HistoryDealGetString(trans.deal,DEAL_COMMENT));
+   if(DiagnosticMode || G_InstanceLock==INVALID_HANDLE) return;
+   long dealEntry=HistoryDealGetInteger(trans.deal,DEAL_ENTRY);
+   if(dealEntry==DEAL_ENTRY_IN || dealEntry==DEAL_ENTRY_INOUT) {
+      string module=HistoryDealGetString(trans.deal,DEAL_COMMENT);
+      if(HistoryOrderSelect(trans.order)) module=HistoryOrderGetString(trans.order,ORDER_COMMENT);
+      if(IsBaseStopModule(module)) {
+         int side=(int)HistoryDealGetInteger(trans.deal,DEAL_TYPE);
+         if(side!=DEAL_TYPE_BUY && side!=DEAL_TYPE_SELL) return;
+         datetime filled=(datetime)HistoryDealGetInteger(trans.deal,DEAL_TIME);
+         if(side==DEAL_TYPE_BUY && filled>G_LastBuyTime) G_LastBuyTime=filled;
+         else if(side==DEAL_TYPE_SELL && filled>G_LastSellTime) G_LastSellTime=filled;
+         G_BaseStopOCOTripped=true; G_BaseConsumed=true;
+         if(!SaveSafetyState()) G_StateOK=false;
+         CancelBaseStopOrders();
+      }
+   }
 }
 
 void OnTimer() {
    RefreshMarketContext();
    CheckEquityProtection();
    ReviewOwnPending();
+   if(BaseUseStopOrders) CheckBaseStopSetup(); // Retry warm-up data without waiting for another chart bar.
    ServiceVisuals(); // Paint at bounded wall-clock rate, not every simulated second.
    static datetime lastAI=0;
    if(TimeCurrent()-lastAI>=5) { CheckAISignals(); lastAI=TimeCurrent(); }
@@ -1005,7 +1026,7 @@ int AuditModuleIndex(string module) {
    if(module=="SMC_Comp" || module=="SMC_Comp_Limit" || module=="COMP") return AUDIT_COMP;
    if(module=="SMC_OTE" || module=="SMC_OTE_Reclaim" || module=="OTE") return AUDIT_OTE;
    if(module=="SMC_Sweep" || StringFind(module,"SW")==0) return AUDIT_SWEEP;
-   if(module=="SMC_Base" || module=="SMC_Base_ATR" || module=="BASE") return AUDIT_BASE;
+   if(module=="SMC_Base" || module=="SMC_Base_ATR" || IsBaseStopModule(module) || module=="BASE") return AUDIT_BASE;
    if(module=="AI NEWS BUY" || module=="AI NEWS SELL" || module=="AI") return AUDIT_AI;
    return -1;
 }
@@ -1042,6 +1063,7 @@ bool SignalModuleEnabled(string module) {
    if(module=="SMC_OTE_Reclaim") return EnableSMC_OTE && RequireOTEReclaim;
    if(module=="SMC_Sweep") return EnableSMC_Sweep;
    if(module=="SMC_Base" || module=="SMC_Base_ATR") return EnableSMC_Base;
+   if(IsBaseStopModule(module)) return EnableSMC_Base && BaseUseStopOrders;
    if(module=="AI NEWS BUY" || module=="AI NEWS SELL") return EnableAICommands;
    return false;
 }
@@ -1254,6 +1276,155 @@ void CheckEMATouchLive() {
    }
 }
 
+bool IsBaseStopModule(string module) {
+   return module=="SMC_Base_Stop_B" || module=="SMC_Base_Stop_S" ||
+      StringFind(module,"SMC_Base_Stop_B:")==0 || StringFind(module,"SMC_Base_Stop_S:")==0;
+}
+string BaseStopGroup(string module) {
+   int colon=StringFind(module,":");
+   return colon>=0?StringSubstr(module,colon+1):"";
+}
+bool IsIndividualBaseModule(string module) {
+   return module=="SMC_Base_ATR" || IsBaseStopModule(module);
+}
+
+// Only pivots confirmed by closed candles. A profitable target must exist before placing a pending.
+double BaseExtremumTarget(const MqlRates &bars[],int side,int wings,double entry,bool latest) {
+   if((side!=POSITION_TYPE_BUY && side!=POSITION_TYPE_SELL) || wings<1 || !Positive(entry)) return 0;
+   double target=0;
+   for(int j=wings;j+wings<ArraySize(bars);j++) {
+      double value=side==POSITION_TYPE_BUY?bars[j].high:bars[j].low;
+      if(!Positive(value) || (side==POSITION_TYPE_BUY?value<=entry:value>=entry)) continue;
+      bool pivot=true;
+      for(int k=1;k<=wings;k++) {
+         double newer=side==POSITION_TYPE_BUY?bars[j-k].high:bars[j-k].low;
+         double older=side==POSITION_TYPE_BUY?bars[j+k].high:bars[j+k].low;
+         if(!Positive(newer) || !Positive(older) ||
+            (side==POSITION_TYPE_BUY?(value<=newer || value<=older):(value>=newer || value>=older))) {
+            pivot=false; break;
+         }
+      }
+      if(!pivot) continue;
+      if(latest) return value;
+      if(target==0 || (side==POSITION_TYPE_BUY?value<target:value>target)) target=value;
+   }
+   return target;
+}
+
+bool GetBaseStopTarget(int side,double entry,double &target,bool &historyReady) {
+   target=0; historyReady=true;
+   for(int index=0;index<2;index++) {
+      ENUM_TIMEFRAMES tf=index==0?PERIOD_H1:PERIOD_H4;
+      if((BaseTargetScope==BASE_TARGET_H1 && tf!=PERIOD_H1) ||
+         (BaseTargetScope==BASE_TARGET_H4 && tf!=PERIOD_H4)) continue;
+      MqlRates rates[]; ArraySetAsSeries(rates,true);
+      if(!SeriesInfoInteger(_Symbol,tf,SERIES_SYNCHRONIZED) ||
+         CopyRates(_Symbol,tf,1,BaseSwingLookback,rates)!=BaseSwingLookback) {
+         historyReady=false; SafetyLog("BASE STOP: H1/H4 target history unavailable"); return false;
+      }
+      double candidate=BaseExtremumTarget(rates,side,BaseSwingStrength,entry,false);
+      if(Positive(candidate) && (target==0 || (side==POSITION_TYPE_BUY?candidate<target:candidate>target))) target=candidate;
+   }
+   return Positive(target);
+}
+
+bool BaseStopHasPosition() {
+   for(int i=0;i<PositionsTotal();i++) {
+      ulong t=PositionGetTicket(i);
+      if(IsOwnPosition(t) && IsBaseStopModule(PositionGetString(POSITION_COMMENT))) return true;
+   }
+   return false;
+}
+bool BaseStopHasPending() {
+   for(int i=0;i<OrdersTotal();i++) {
+      ulong t=OrderGetTicket(i);
+      if(IsOwnOrder(t) && IsBaseStopModule(OrderGetString(ORDER_COMMENT))) return true;
+   }
+   return false;
+}
+void CancelBaseStopOrders() {
+   if(DiagnosticMode || G_InstanceLock==INVALID_HANDLE) return;
+   for(int i=OrdersTotal()-1;i>=0;i--) {
+      ulong t=OrderGetTicket(i);
+      if(IsOwnOrder(t) && IsBaseStopModule(OrderGetString(ORDER_COMMENT))) SafeDelete(t);
+   }
+}
+
+// Recover OCO after restart, including a fill that has already closed before reconnection.
+bool BaseStopFilledSince(datetime since,string expectedComment,bool &historyReady) {
+   string group=BaseStopGroup(expectedComment);
+   datetime zone=(datetime)StringToInteger(group);
+   if(zone>0 && zone<since) since=zone;
+   historyReady=HistorySelect(since,TimeCurrent());
+   if(!historyReady) return false;
+   for(int i=0;i<HistoryDealsTotal();i++) {
+      ulong deal=HistoryDealGetTicket(i); if(deal==0) { historyReady=false; return false; }
+      if(HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol || (ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)!=MagicNumber) continue;
+      long entry=HistoryDealGetInteger(deal,DEAL_ENTRY);
+      if(entry!=DEAL_ENTRY_IN && entry!=DEAL_ENTRY_INOUT) continue;
+      string comment=HistoryDealGetString(deal,DEAL_COMMENT);
+      ulong order=(ulong)HistoryDealGetInteger(deal,DEAL_ORDER);
+      string original=HistoryOrderGetString(order,ORDER_COMMENT);
+      if(original=="" && !IsBaseStopModule(comment)) { historyReady=false; return false; }
+      if((IsBaseStopModule(comment) && (group=="" || BaseStopGroup(comment)==group)) ||
+         (IsBaseStopModule(original) && (group=="" || BaseStopGroup(original)==group))) return true;
+   }
+   return false;
+}
+
+void CheckBaseStopSetup() {
+   AuditModuleCall(AUDIT_BASE);
+   if(!SeriesInfoInteger(_Symbol,_Period,SERIES_SYNCHRONIZED)) return;
+   datetime closed=iTime(_Symbol,_Period,1);
+   if(closed<=0 || closed==G_BaseCheckedBar) return;
+   double atr[];
+   if(CopyBuffer(h_atr,0,1,1,atr)!=1 || !Positive(atr[0]) || Bars(_Symbol,_Period)<10) return;
+   int hi=iHighest(_Symbol,_Period,MODE_HIGH,8,2),lo=iLowest(_Symbol,_Period,MODE_LOW,8,2);
+   if(hi<0 || lo<0) return;
+   double high=iHigh(_Symbol,_Period,hi),low=iLow(_Symbol,_Period,lo),c1=iClose(_Symbol,_Period,1);
+   if(!Positive(low) || !Positive(high) || high<=low || high-low>=atr[0]*1.5) { G_BaseCheckedBar=closed; return; }
+   AuditModuleRead(AUDIT_BASE);
+   datetime first=iTime(_Symbol,_Period,9);
+   DrawR("BaseZone_"+TimeToString(first),first,high,TimeCurrent()+PeriodSeconds()*10,low,clrDarkGray,"BASE");
+   if(BaseStopHasPosition()) { G_BaseCheckedBar=closed; G_BaseConsumed=true; CancelBaseStopOrders(); return; }
+   if(BaseStopHasPending()) { G_BaseCheckedBar=closed; return; } // Freeze existing order boundaries/targets until execution or expiry.
+   G_BaseStopOCOTripped=false;
+   if(!Positive(c1) || c1<low || c1>high) { G_BaseCheckedBar=closed; SafetyLog("BASE STOP: closed price already outside BASE; no chase"); return; }
+   if(G_BaseConsumed && BaseBreakoutSide(c1,G_BaseLow,G_BaseHigh)>=0) { G_BaseCheckedBar=closed; return; }
+   if(BaseRequireVolumeSpike) {
+      double sma=GetVolumeSMA(Vol_SMA_Period);
+      if(!Positive(sma) || (double)iVolume(_Symbol,_Period,1)<=sma*VolSpikeCoef) {
+         G_BaseCheckedBar=closed; SafetyLog("BASE STOP: optional volume filter not confirmed"); return;
+      }
+   }
+   MqlRates stops[]; ArraySetAsSeries(stops,true);
+   if(CopyRates(_Symbol,_Period,1,BaseSwingLookback,stops)!=BaseSwingLookback) {
+      SafetyLog("BASE STOP: confirmed stop swing history unavailable"); return;
+   }
+   double targets[2]={0,0};
+   for(int side=POSITION_TYPE_BUY;side<=POSITION_TYPE_SELL;side++) {
+      bool ready=false;
+      GetBaseStopTarget(side,side==POSITION_TYPE_BUY?high:low,targets[side],ready);
+      if(!ready) return; // Keep this bar eligible while terminal downloads the target history.
+   }
+   G_BaseCheckedBar=closed;
+   G_BaseHigh=high; G_BaseLow=low; G_BaseStarted=first; G_BaseConsumed=false;
+   if(DiagnosticMode || !EnableAutoTrade || !EnableSMC_Base) return;
+   for(int side=POSITION_TYPE_BUY;side<=POSITION_TYPE_SELL;side++) {
+      if(G_BaseStopOCOTripped || BaseStopHasPosition()) { CancelBaseStopOrders(); return; }
+      double entry=side==POSITION_TYPE_BUY?high:low,sl=0;
+      if(!BaseSwingStop(stops,side,BaseSwingStrength,BaseSLBufferPoints*_Point,sl)) {
+         SafetyLog("BASE STOP: confirmed SL pivot unavailable"); continue;
+      }
+      double tp=targets[side];
+      if(!Positive(tp)) { SafetyLog("BASE STOP: no confirmed target beyond boundary"); continue; }
+      string module=(side==POSITION_TYPE_BUY?"SMC_Base_Stop_B:":"SMC_Base_Stop_S:")+IntegerToString((long)first);
+      Print("SN365 BASE STOP | zone=",TimeToString(first)," | module=",module,
+         " | boundary=",DoubleToString(entry,_Digits)," | target=",DoubleToString(tp,_Digits));
+      SubmitEntry(side,true,entry,sl,module,0,1,tp);
+   }
+}
+
 // Use numerical BASE bounds, never chart-object coordinates for trade decisions.
 int BaseBreakoutSide(double close,double low,double high) {
    if(!Positive(close) || !Positive(low) || !Positive(high) || high<=low) return -1;
@@ -1295,6 +1466,7 @@ double BaseATRTarget(bool buy,double entry,double atr,double tick,int digits) {
 }
 
 void CheckBaseBreakout() {
+   if(BaseUseStopOrders) { CheckBaseStopSetup(); return; }
    AuditModuleCall(AUDIT_BASE);
    if(!SeriesInfoInteger(_Symbol,_Period,SERIES_SYNCHRONIZED) || Bars(_Symbol,_Period)<10) return;
    datetime closed=iTime(_Symbol,_Period,1);
@@ -1766,7 +1938,7 @@ bool EntryPolicy(int side,string comment,bool pending,bool existing) {
    if(existing) return true; // No self-duplicate/cooldown rejection of an existing pending.
    datetime last=side==POSITION_TYPE_BUY?G_LastBuyTime:G_LastSellTime;
    // A paired compression limit still passes exposure/risk/SL checks. It is not another market entry.
-   if(!pending && (TimeCurrent()<last || TimeCurrent()-last<EntryDelayMinutes*60)) {
+   if((!pending || IsBaseStopModule(comment)) && (TimeCurrent()<last || TimeCurrent()-last<EntryDelayMinutes*60)) {
       SafetyLog(comment+": cooldown"); return AuditGateReject(comment);
    }
    for(int i=0;i<PositionsTotal();i++) {
@@ -1873,7 +2045,7 @@ void ResolveEntryRejection(string comment) {
    SafetyLog(comment+": definitively rejected, no fill; entry retry paused 60 model seconds");
 }
 
-bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,string comment,double baseATR=0.0) {
+bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,string comment,double baseATR=0.0,int basePendingKind=0,double baseTarget=0.0) {
    RefreshMarketContext(); CheckEquityProtection();
    if(!EntryPolicy(side,comment,pending,false)) return false;
    if(TimeCurrent()<G_EntryRetryAfter) return false;
@@ -1881,17 +2053,32 @@ bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,st
    if(!SymbolInfoTick(_Symbol,quote) || !Positive(quote.ask) || !Positive(quote.bid)) return false;
    double tick=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
    if(!Positive(tick)) { SafetyLog("entry: invalid tick size"); return false; }
-   double entry=pending?NormalizeDouble(MathRound(proposedEntry/tick)*tick,_Digits):
+   bool baseStop=IsBaseStopModule(comment);
+   if(baseStop && (!pending || basePendingKind!=1)) {
+      SafetyLog("BASE STOP: invalid pending request"); return false;
+   }
+   if(!baseStop && (basePendingKind!=0 || baseTarget!=0)) { SafetyLog("BASE STOP: pending arguments on another module"); return false; }
+   double entry=pending?NormalizeDouble((baseStop?(side==POSITION_TYPE_BUY?MathCeil(proposedEntry/tick):MathFloor(proposedEntry/tick)):MathRound(proposedEntry/tick))*tick,_Digits):
       (side==POSITION_TYPE_BUY?quote.ask:quote.bid);
    double sl=NormalizeDouble((side==POSITION_TYPE_BUY?MathFloor(proposedSL/tick):MathCeil(proposedSL/tick))*tick,_Digits);
    double minDistance=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*_Point;
    bool buy=side==POSITION_TYPE_BUY;
    if(!Positive(sl) || (buy?sl>=entry:sl<=entry) || MathAbs(entry-sl)<minDistance ||
       (!pending && (buy?quote.bid-sl:sl-quote.ask)<minDistance) ||
-      (pending && (buy?quote.ask-entry:entry-quote.bid)<=minDistance)) {
+      (pending && (baseStop?(buy?entry-quote.ask:quote.bid-entry):(buy?quote.ask-entry:entry-quote.bid))<=minDistance)) {
       SafetyLog(comment+": invalid side/distance/grid of entry or SL"); return false;
    }
    double tp=0;
+   if(baseStop) {
+      long allowed=SymbolInfoInteger(_Symbol,SYMBOL_ORDER_MODE);
+      long required=SYMBOL_ORDER_STOP;
+      if((allowed & required)==0) { SafetyLog("BASE STOP: broker does not support requested order type"); return false; }
+      tp=NormalizeDouble((buy?MathFloor(baseTarget/tick):MathCeil(baseTarget/tick))*tick,_Digits);
+      if(!Positive(tp) || (buy?tp-entry:entry-tp)<=minDistance || baseATR!=0) {
+         SafetyLog("BASE STOP: target unavailable/too close or unsupported ATR target"); return false;
+      }
+
+   }
    if(comment=="SMC_Base_ATR") {
       if(pending) { SafetyLog("SMC_Base_ATR: pending entry unsupported"); return false; }
       tp=BaseATRTarget(buy,entry,baseATR,tick,_Digits);
@@ -1921,10 +2108,15 @@ bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,st
    }
    MqlTradeRequest request={}; MqlTradeCheckResult check={};
    request.action=pending?TRADE_ACTION_PENDING:TRADE_ACTION_DEAL;
-   request.type=pending?(buy?ORDER_TYPE_BUY_LIMIT:ORDER_TYPE_SELL_LIMIT):(buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL);
+   request.type=pending?(baseStop?(buy?ORDER_TYPE_BUY_STOP:ORDER_TYPE_SELL_STOP):
+      (buy?ORDER_TYPE_BUY_LIMIT:ORDER_TYPE_SELL_LIMIT)):(buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL);
    request.symbol=_Symbol; request.magic=MagicNumber; request.volume=volume;
-   request.price=entry; request.sl=sl; request.tp=tp; request.comment=comment;
-   request.type_time=ORDER_TIME_GTC; request.deviation=10;
+   request.price=entry; request.stoplimit=0; request.sl=sl; request.tp=tp; request.comment=comment;
+   request.type_time=ORDER_TIME_GTC; request.expiration=0; request.deviation=10;
+   if(baseStop && (SymbolInfoInteger(_Symbol,SYMBOL_EXPIRATION_MODE) & SYMBOL_EXPIRATION_SPECIFIED)!=0) {
+      request.type_time=ORDER_TIME_SPECIFIED;
+      request.expiration=TimeCurrent()+(long)BaseMaxWaitBars*PeriodSeconds(_Period);
+   }
    long modes=SymbolInfoInteger(_Symbol,SYMBOL_FILLING_MODE);
    if(pending) request.type_filling=ORDER_FILLING_RETURN;
    else if((modes & SYMBOL_FILLING_FOK)!=0) request.type_filling=ORDER_FILLING_FOK;
@@ -1942,7 +2134,9 @@ bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,st
    AuditSubmission(comment,false,pending);
    trade.SetAsyncMode(false); trade.SetDeviationInPoints(10); trade.SetTypeFilling(request.type_filling);
    bool ok=false;
-   if(pending) {
+   if(baseStop) {
+      ok=trade.OrderOpen(_Symbol,request.type,volume,0,entry,sl,tp,request.type_time,request.expiration,comment);
+   } else if(pending) {
       if(buy) ok=trade.BuyLimit(volume,entry,_Symbol,sl,0,ORDER_TIME_GTC,0,comment);
       else ok=trade.SellLimit(volume,entry,_Symbol,sl,0,ORDER_TIME_GTC,0,comment);
    } else {
@@ -2008,9 +2202,19 @@ void ReviewOwnPending() {
       int side=(type==ORDER_TYPE_BUY_LIMIT || type==ORDER_TYPE_BUY_STOP || type==ORDER_TYPE_BUY_STOP_LIMIT)?
          POSITION_TYPE_BUY:POSITION_TYPE_SELL;
       string comment=OrderGetString(ORDER_COMMENT);
+      bool invalidBase=false;
+      if(IsBaseStopModule(comment)) {
+         datetime setup=(datetime)OrderGetInteger(ORDER_TIME_SETUP);
+         double tp=OrderGetDouble(ORDER_TP);
+         bool ready=false,filled=BaseStopFilledSince(setup,comment,ready);
+         MqlTick q; bool quoted=SymbolInfoTick(_Symbol,q) && Positive(q.bid) && Positive(q.ask);
+         invalidBase=G_BaseStopOCOTripped || BaseStopHasPosition() || !BaseUseStopOrders || !ready || filled ||
+            setup<=0 || TimeCurrent()<setup || TimeCurrent()-setup>=(long)BaseMaxWaitBars*PeriodSeconds(_Period) ||
+            !Positive(tp) || !quoted || (side==POSITION_TYPE_BUY?q.bid>=tp:q.ask<=tp);
+      }
       bool invalidModule=comment=="SMC_Comp_Limit" && (!G_D1_DataReady || !G_D1_Valid ||
          side!=(G_Fibo_isUp?POSITION_TYPE_BUY:POSITION_TYPE_SELL));
-      if(invalidExposure || invalidModule || !EntryPolicy(side,comment,true,true)) SafeDelete(ticket);
+      if(invalidExposure || invalidBase || invalidModule || !EntryPolicy(side,comment,true,true)) SafeDelete(ticket);
    }
 }
 
@@ -2041,7 +2245,7 @@ bool CanOpenLot(int type,string block_comment) {
    return EntryPolicy(type,block_comment,false,false);
 }
 
-// Individual BASE targets are recomputed from entry +/- 2 * closed-bar ATR.
+// BASE ATR positions refresh their TP; BASE Stop positions keep a fixed extremum TP. Both retain individual BE.
 void ManageBaseATRPositions() {
    if(!TradingMutationAllowed() || G_InstanceLock==INVALID_HANDLE || G_StopLatched || !G_StateOK || G_ExecutionUncertain) return;
    static datetime lastATRBar=0;
@@ -2057,12 +2261,12 @@ void ManageBaseATRPositions() {
    if(recalc) lastATRBar=closed;
    for(int i=PositionsTotal()-1;i>=0;i--) {
       ulong ticket=PositionGetTicket(i);
-      if(!IsOwnPosition(ticket) || PositionGetString(POSITION_COMMENT)!="SMC_Base_ATR") continue;
+      if(!IsOwnPosition(ticket) || !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) continue;
       bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
       double entry=PositionGetDouble(POSITION_PRICE_OPEN),sl=PositionGetDouble(POSITION_SL);
       double tp=PositionGetDouble(POSITION_TP);
       if(!Positive(sl)) { SafetyLog("SMC_Base_ATR: missing SL; portfolio protection remains active"); continue; }
-      if(recalc) {
+      if(recalc && PositionGetString(POSITION_COMMENT)=="SMC_Base_ATR") {
          double target=BaseATRTarget(buy,entry,atr[0],tick,_Digits);
          if(!Positive(target)) { SafetyLog("SMC_Base_ATR: ATR target unavailable"); continue; }
          if(buy?q.bid>=target:q.ask<=target) { SafeClose(ticket); continue; }
@@ -2102,7 +2306,7 @@ void ManagePositions() {
    for(int i = PositionsTotal() - 1; i >= 0; i--) {
       ulong ticket = PositionGetTicket(i);
       if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber)) {
-         if(PositionGetString(POSITION_COMMENT)=="SMC_Base_ATR") continue;
+         if(IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) continue;
          double vol = PositionGetDouble(POSITION_VOLUME);
          double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
          long type = PositionGetInteger(POSITION_TYPE);
@@ -2118,7 +2322,7 @@ void ManagePositions() {
          double new_sl = NormalizeDouble(avg_buy + Physical_BE_Level * point, _Digits);
          for(int i = PositionsTotal() - 1; i >= 0; i--) {
             ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && PositionGetString(POSITION_COMMENT)!="SMC_Base_ATR") {
+            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) {
                double current_sl = PositionGetDouble(POSITION_SL);
                double current_tp = PositionGetDouble(POSITION_TP);
                if(current_sl < new_sl || current_sl == 0) SafeModify(ticket, new_sl, current_tp);
@@ -2139,7 +2343,7 @@ void ManagePositions() {
       if(bid >= target_tp_buy) {
          for(int i = PositionsTotal() - 1; i >= 0; i--) {
             ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && PositionGetString(POSITION_COMMENT)!="SMC_Base_ATR") SafeClose(ticket);
+            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) SafeClose(ticket);
          }
 
       }
@@ -2152,7 +2356,7 @@ void ManagePositions() {
          double new_sl = NormalizeDouble(avg_sell - Physical_BE_Level * point, _Digits);
          for(int i = PositionsTotal() - 1; i >= 0; i--) {
             ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && PositionGetString(POSITION_COMMENT)!="SMC_Base_ATR") {
+            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) {
                double current_sl = PositionGetDouble(POSITION_SL);
                double current_tp = PositionGetDouble(POSITION_TP);
                if(current_sl > new_sl || current_sl == 0) SafeModify(ticket, new_sl, current_tp);
@@ -2173,7 +2377,7 @@ void ManagePositions() {
       if(ask <= target_tp_sell) {
          for(int i = PositionsTotal() - 1; i >= 0; i--) {
             ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && PositionGetString(POSITION_COMMENT)!="SMC_Base_ATR") SafeClose(ticket);
+            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) SafeClose(ticket);
          }
 
       }
@@ -2740,7 +2944,7 @@ void PaintOwnManagementViews() {
    double volume[2]={0,0},weighted[2]={0,0};
    for(int i=0;i<PositionsTotal();i++) {
       ulong ticket=PositionGetTicket(i); if(!IsOwnPosition(ticket)) continue;
-      if(PositionGetString(POSITION_COMMENT)=="SMC_Base_ATR") continue;
+      if(IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) continue;
       int side=(int)PositionGetInteger(POSITION_TYPE); if(side<0 || side>1) continue;
       double v=PositionGetDouble(POSITION_VOLUME);
       volume[side]+=v; weighted[side]+=v*PositionGetDouble(POSITION_PRICE_OPEN);

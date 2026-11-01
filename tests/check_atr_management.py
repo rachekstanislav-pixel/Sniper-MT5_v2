@@ -4,9 +4,9 @@ import re,subprocess,tempfile
 r=Path(__file__).resolve().parents[1]
 s=(r/'Sniper_Manager_v3_6_5_BASE_ATR.mq5').read_text()
 def extract(name):
- m=re.search(r'^(?:void|double) '+name+r'\([^{};]*\)\s*\{',s,re.M)
+ m=re.search(r'^(?:void|double|bool) '+name+r'\([^{};]*\)\s*\{',s,re.M)
  return s[m.start():s.index('\n}',m.end())+2]
-funcs='\n'.join(extract(n) for n in ('BaseATRTarget','ManageBaseATRPositions')).replace('double atr[];','std::vector<double> atr;')
+funcs='\n'.join(extract(n) for n in ('IsBaseStopModule','IsIndividualBaseModule','BaseATRTarget','ManageBaseATRPositions')).replace('double atr[];','std::vector<double> atr;')
 h=r'''
 #include <cmath>
 #include <string>
@@ -22,6 +22,7 @@ double _Point=1,atrValue=2,bid=102,ask=103,freeze=0;
 bool G_StopLatched=false,G_StateOK=true,G_ExecutionUncertain=false,mutate=true;
 datetime closedBar=10;
 bool TradingMutationAllowed(){return mutate;}
+int StringFind(string text,string sub){auto p=text.find(sub);return p==string::npos?-1:(int)p;}
 bool Positive(double x){return std::isfinite(x)&&x>0;}
 double MathCeil(double x){return std::ceil(x);}double MathFloor(double x){return std::floor(x);}
 double MathMax(double x,double y){return std::max(x,y);}double MathAbs(double x){return std::abs(x);}
@@ -61,6 +62,9 @@ int main(){
  positions={{true,"SMC_Base_ATR",1,100,110,94}};bid=97;ask=98;atrValue=2;closedBar++;
  ManageBaseATRPositions();assert(positions[0].tp==96 && positions[0].sl==110);
  atrValue=1;bid=96;ask=97;closedBar++;ManageBaseATRPositions();assert(closures==2); // mirrored SELL reached revised target
+ positions={{true,"SMC_Base_Stop_B",0,100,90,109}};bid=102;ask=103;atrValue=2;closedBar++;
+ ManageBaseATRPositions();assert(positions[0].tp==109); // nearest-extremum target must not be replaced by ATR
+ Physical_BE_Trigger=1;ManageBaseATRPositions();assert(positions[0].sl==101 && positions[0].tp==109);
  std::cout<<"PASS: actual ATR manager updates on closed bars, preserves SL/ownership/BE and respects freeze/global stop\n";
 }
 '''

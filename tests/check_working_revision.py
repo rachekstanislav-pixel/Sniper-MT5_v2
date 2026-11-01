@@ -13,11 +13,14 @@ def function(text,name):
  end=text.index('\n}',m.end())+2
  return text[m.start():end]
 # These risk, management and visual geometry functions must remain literally unchanged.
-unchanged=['GetDynamicRisk','GetDynamicGlobalRisk','SafeVolume','OwnExposure','EntryPolicy',
+unchanged=['GetDynamicRisk','GetDynamicGlobalRisk','SafeVolume','OwnExposure',
 'LossAtSL','SafeModify','SafeClose','SafeDelete','CheckEquityProtection',
 'PaintSignalViews','UpdatePreviousDayFibo','UpdateH4Zones','UpdateLegacyStructureVisuals']
 for name in unchanged:
  assert function(s,name)==function(base,name), f'Unexpected change: {name}'
+# BASE stop placements now obey cooldown, unlike the paired compression limit.
+policy=function(s,'EntryPolicy').replace('(!pending || IsBaseStopModule(comment))','!pending')
+assert policy==function(base,'EntryPolicy'), 'Unexpected change outside the new BASE pending cooldown guard'
 functions='\n'.join(function(s,n) for n in ['DirectionAllowed','SafeVolume','CheckCompressionPhase'])
 functions=functions.replace('double atr_val[], atr_ma_val[];', 'std::vector<double> atr_val, atr_ma_val;')
 harness=r'''
