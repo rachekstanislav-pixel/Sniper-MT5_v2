@@ -6,8 +6,8 @@
 //+------------------------------------------------------------------+
 #property strict
 #property version "3.65"
-#define SNIPER_BUILD_ID "M5_BASE_OTE_FIX_1"
-#property description "M5_BASE_OTE_FIX_1: BASE Buy/Sell Stop, D1 OTE M15, all entry modules enabled"
+#define SNIPER_BUILD_ID "M5_ALL_MODULES_V3"
+#property description "M5_ALL_MODULES_V3: BASE Buy/Sell Stop, D1 OTE M15, all entry modules enabled"
 #include <Trade\Trade.mqh>
 #include <Canvas\Canvas.mqh>
 

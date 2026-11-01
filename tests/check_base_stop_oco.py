@@ -1,7 +1,7 @@
 """Execute actual pending review, deal callback and restart OCO recovery."""
 from pathlib import Path
 import re,subprocess,tempfile
-s=(Path(__file__).resolve().parents[1]/'Sniper_Manager_v3_6_5_M5_BASE_OTE_FIX_1.mq5').read_text()
+s=(Path(__file__).resolve().parents[1]/'Sniper_Manager_v3_6_5_M5_ALL_MODULES_V3.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:bool|string|void) '+name+r'\([^{};]*\)\s*\{',s,re.M);assert m,name
  return s[m.start():s.index('\n}',m.end())+2]

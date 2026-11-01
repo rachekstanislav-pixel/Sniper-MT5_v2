@@ -1,7 +1,7 @@
 """Execute the actual BASE setup, H1/H4 target choice and stop submission together."""
 from pathlib import Path
 import ast,re,subprocess,tempfile
-root=Path(__file__).resolve().parents[1];s=(root/'Sniper_Manager_v3_6_5_M5_BASE_OTE_FIX_1.mq5').read_text()
+root=Path(__file__).resolve().parents[1];s=(root/'Sniper_Manager_v3_6_5_M5_ALL_MODULES_V3.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:bool|string|void|double|int) '+name+r'\([^{};]*\)\s*\{',s,re.M);assert m,name
  return s[m.start():s.index('\n}',m.end())+2]

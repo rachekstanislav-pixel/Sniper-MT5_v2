@@ -1,7 +1,7 @@
 """Actual D1/M15/OB state machine and orchestration, compiled with MT5 API doubles."""
 from pathlib import Path
 import re,subprocess,tempfile
-r=Path(__file__).resolve().parents[1];s=(r/'Sniper_Manager_v3_6_5_M5_BASE_OTE_FIX_1.mq5').read_text()
+r=Path(__file__).resolve().parents[1];s=(r/'Sniper_Manager_v3_6_5_M5_ALL_MODULES_V3.mq5').read_text()
 def extract(name):
  m=re.search(r'^(?:bool|void|int) '+name+r'\([^{};]*\)\s*\{',s,re.M)
  assert m,name

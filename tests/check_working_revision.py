@@ -4,7 +4,7 @@ This exercises decision logic, not MQL compilation, broker execution or chart re
 from pathlib import Path
 import subprocess, tempfile, re, hashlib, json
 root=Path(__file__).resolve().parents[1]
-s=(root/'Sniper_Manager_v3_6_5_M5_BASE_OTE_FIX_1.mq5').read_text()
+s=(root/'Sniper_Manager_v3_6_5_M5_ALL_MODULES_V3.mq5').read_text()
 base=(root/'baseline/Sniper_Manager_v3_6_5_VISUAL_AUDIT.mq5').read_text(encoding='utf-8-sig')
 def function(text,name):
  m=re.search(r'^(?:bool|void|double|int|string) '+re.escape(name)+r'\([^{};]*\)\s*\{',text,re.M)
