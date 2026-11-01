@@ -1,4 +1,4 @@
-# Sniper Manager 3.6.5 BASE ATR
+# Sniper Manager 3.6.5 BASE DETECT 2
 
 Полная автономная рабочая версия советника MetaTrader 5 на базе 3.6.5 VISUAL_AUDIT. Алгоритм 3.6.6 не переносился.
 
@@ -12,7 +12,8 @@
 
 ## Файлы
 
-`Sniper_Manager_v3_6_5_BASE_ATR.mq5` — полный исходник; дополнительные модули проекта не нужны.
+`Sniper_Manager_v3_6_5_BASE_DETECT_2.mq5` — полный исходник; дополнительные модули проекта не нужны.
+`Sniper_Manager_v3_6_5_BASE_ATR.mq5` — сохранённая предыдущая версия (BASE-STOP-1, коммит 690fd23), для сравнения.
 Стандартные библиотеки MT5: `Trade/Trade.mqh`, `Canvas/Canvas.mqh`.
 `Sniper_v3_6_5_BASE_ATR_NO_EMA.set` — рабочие настройки.
 `Sniper_v3_6_5_BASE_ONLY_TEST.set` — настройки для изолированной проверки BASE.
