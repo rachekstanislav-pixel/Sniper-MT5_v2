@@ -66,7 +66,7 @@ assert 'input int BaseTrailBars = 5;' in s
 assert 'input double BasePipSize = 0.01;' in s
 assert 'input double BaseInitialSLPips = 50.0;' in s
 assert 'input double BaseHalfExitPips = 1000.0;' in s
-assert 'MODE_HIGH,8,2' in extract('CheckBaseStopSetup')
+assert 'MODE_HIGH,8,1' in extract('CheckBaseStopSetup')
 assert 'GetBaseStopTarget' not in extract('CheckBaseStopSetup')
 assert 'BaseSwingStop' not in extract('CheckBaseStopSetup')
 assert 'ReadBaseZone' not in extract('CheckBaseStopSetup')
@@ -106,4 +106,4 @@ int main(){
 }
 ''')
 
-assert (root/"Sniper_Manager_v3_6_5_BASE_FIX2.mq5").read_bytes()==(root/"Sniper_Manager_v3_6_5_STAGE1_BASE_65_35.mq5").read_bytes(), "Current file and fresh-name release must match"
+assert (root/"Sniper_Manager_v3_6_5_BASE_FIX3.mq5").read_bytes()==(root/"Sniper_Manager_v3_6_5_STAGE1_BASE_65_35.mq5").read_bytes(), "Current file and fresh-name release must match"

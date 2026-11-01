@@ -6,7 +6,7 @@
 //+------------------------------------------------------------------+
 #property strict
 #property version "3.65"
-#property description "FIX2 based on uploaded BASE_ATR_v2: right HUD, eight-bar BASE 65/35, wick trail"
+#property description "FIX3 based on uploaded BASE_ATR_v2: right HUD, last 8 CLOSED bars without ninth-bar delay, BASE 65/35, wick trail"
 #include <Trade\Trade.mqh>
 #include <Canvas\Canvas.mqh>
 
@@ -22,9 +22,9 @@ input ulong  MagicNumber          = 777;      // Magic Number
 input int    EntryDelayMinutes    = 2;        // Задержка между входами (мин)
 
 // ===== 2. НАСТРОЙКИ УПРАВЛЕНИЯ ПОЗИЦИЯМИ (ДЛЯ ВСЕЙ КОРЗИНЫ) =====
-input int    Fixed_TakeProfit     = 1000;     // Legacy compatibility only; FIX2 has NO fixed TP
-input int    Physical_BE_Trigger  = 250;      // Legacy compatibility only; FIX2 has NO break-even rule
-input int    Physical_BE_Level    = 50;       // Legacy compatibility only; unused by FIX2 exits
+input int    Fixed_TakeProfit     = 1000;     // Legacy compatibility only; FIX3 has NO fixed TP
+input int    Physical_BE_Trigger  = 250;      // Legacy compatibility only; FIX3 has NO break-even rule
+input int    Physical_BE_Level    = 50;       // Legacy compatibility only; unused by FIX3 exits
 input int    StopLossPoints       = 500;      // Дефолтный Стоп-лосс для входов ИИ (в пунктах)
 
 // ===== 3. SMC, ОБЪЕМЫ И ТРИГГЕРЫ ВХОДОВ =====
@@ -85,7 +85,7 @@ input int OTEReclaimMaxBars = 4; // Including the sweep candle: at most one hour
 input double OTEReclaimMaxDistanceATR = 0.5; // Maximum entry distance above/below D1 .790
 input bool EnableSMC_Sweep = false; // User disabled standalone Sweep; OTE reclaim remains independent
 input bool EnableSMC_Base = true;
-// FIX2: zone entry settings; wick trailing and half exit apply to ALL own modules.
+// FIX3: zone entry settings; wick trailing and half exit apply to ALL own modules.
 input double BasePipSize = 0.01; // GOLD: one pip in PRICE units, independent of broker digits
 input double BaseInitialSLPips = 50.0; // Initial SL outside the BASE, adjustable
 input int BaseTrailBars = 5; // Closed M5 candles only, allowed range 3..5
@@ -96,7 +96,7 @@ input bool BaseStopBothDirections = true;
 input int BaseEntryRetrySeconds = 5; // Retry a missing side in the SAME frozen zone, never chase price
 input int HudWidthPercent = 72; // Entire information block, right aligned
 enum BASE_TARGET_SCOPE { BASE_TARGET_H1=1, BASE_TARGET_H4=2, BASE_TARGET_H1_H4=3 };
-input BASE_TARGET_SCOPE BaseTargetScope = BASE_TARGET_H1_H4; // Legacy compatibility; FIX2 uses NO fixed target
+input BASE_TARGET_SCOPE BaseTargetScope = BASE_TARGET_H1_H4; // Legacy compatibility; FIX3 uses NO fixed target
 input bool BaseRequireVolumeSpike = false; // Closed breakout is sufficient; optional old volume filter
 input int BaseSwingStrength = 2; // Confirmed local pivot: closed bars on each side
 input int BaseSwingLookback = 64;
@@ -319,8 +319,8 @@ void DeleteOrdersByComment(string comment_str);
 //| INITIALIZATION                                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   Print("SN365 FIX2 | BASE_ATR_v2 foundation | right HUD | all-module wick exits | 8 bars Stop65/35");
-   Print("SN365 FIX2 CONFIG | pip=",BasePipSize," | SLpips=",BaseInitialSLPips," | halfPips=",BaseHalfExitPips," | trailBars=",BaseTrailBars," | stopOrders=",BaseUseStopOrders," | compression=",EnableSMC_Comp," | standaloneSweep=",EnableSMC_Sweep);
+   Print("SN365 FIX3 | BASE_ATR_v2 foundation | right HUD | all-module wick exits | 8 bars Stop65/35");
+   Print("SN365 FIX3 CONFIG | pip=",BasePipSize," | SLpips=",BaseInitialSLPips," | halfPips=",BaseHalfExitPips," | trailBars=",BaseTrailBars," | stopOrders=",BaseUseStopOrders," | compression=",EnableSMC_Comp," | standaloneSweep=",EnableSMC_Sweep);
    Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | BASE STOP / EXTREMUM mode available | build OTE-1+BASE-STOP-1");
    ResetSignalAudit();
    G_VisualEnabled=!MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_VISUAL_MODE);
@@ -1405,7 +1405,7 @@ void Stage1TryHalfExit(ulong ticket) {
    int writeError=GetLastError(); FileClose(h);
    if(written!=8 || writeError!=0) {
       FileDelete(claim,FILE_COMMON); // No broker request was made; a later safe retry is allowed.
-      SafetyLog("FIX2: half-exit claim write failed; no submission"); return;
+      SafetyLog("FIX3: half-exit claim write failed; no submission"); return;
    }
    trade.SetTypeFillingBySymbol(_Symbol);
    bool ok=trade.PositionClosePartial(ticket,volume);
@@ -1423,7 +1423,7 @@ void ManageStage1Position(ulong ticket) {
    double originalSL=PositionGetDouble(POSITION_SL);
    if(PositionGetDouble(POSITION_TP)>0 && Positive(originalSL)) {
       trade.SetAsyncMode(false);
-      TradeResult(trade.PositionModify(ticket,originalSL,0),false,"FIX2 remove fixed TP; SL preserved");
+      TradeResult(trade.PositionModify(ticket,originalSL,0),false,"FIX3 remove fixed TP; SL preserved");
    }
    Stage1TryHalfExit(ticket);
    if(!IsOwnPosition(ticket)) return;
@@ -1582,15 +1582,16 @@ void CheckBaseStopSetup() {
    }
    if(closed!=G_BaseCheckedBar) {
       double atr[];
-      if(CopyBuffer(h_atr,0,1,1,atr)!=1 || !Positive(atr[0]) || Bars(_Symbol,_Period)<10) return;
-      int hi=iHighest(_Symbol,_Period,MODE_HIGH,8,2),lo=iLowest(_Symbol,_Period,MODE_LOW,8,2);
+      if(CopyBuffer(h_atr,0,1,1,atr)!=1 || !Positive(atr[0]) || Bars(_Symbol,_Period)<9) return;
+      // Candle 1 is INCLUDED in the eight-bar zone. No ninth confirmation candle.
+      int hi=iHighest(_Symbol,_Period,MODE_HIGH,8,1),lo=iLowest(_Symbol,_Period,MODE_LOW,8,1);
       if(hi<0 || lo<0) return;
       double high=iHigh(_Symbol,_Period,hi),low=iLow(_Symbol,_Period,lo),c1=iClose(_Symbol,_Period,1);
-      datetime first=iTime(_Symbol,_Period,9);
+      datetime first=iTime(_Symbol,_Period,8);
       G_BaseCheckedBar=closed;
       bool narrow=Positive(low) && Positive(high) && high>low && high-low<atr[0]*1.5 && first>0;
       if(narrow && (!Positive(c1) || c1<low || c1>high))
-         Print("SN365 FIX2 BASE SKIP | first=",TimeToString(first)," | last close outside zone | close=",c1," | low=",low," | high=",high);
+         Print("SN365 FIX3 BASE SKIP | first=",TimeToString(first)," | last close outside zone | close=",c1," | low=",low," | high=",high);
       if(narrow) {
          AuditModuleRead(AUDIT_BASE);
          DrawR("BaseZone_"+TimeToString(first),first,high,now+PeriodSeconds()*BaseMaxWaitBars,low,clrDarkGray,"BASE");
@@ -1605,7 +1606,7 @@ void CheckBaseStopSetup() {
                G_BaseHigh=high; G_BaseLow=low; G_BaseStarted=first; G_BaseConsumed=false;
                G_BaseStageReady=true; G_BaseStopOCOTripped=false; G_BaseStageAttempt=0;
                G_BaseStageDeadline=(datetime)((long)now+(long)BaseMaxWaitBars*PeriodSeconds(_Period));
-               Print("SN365 FIX2 BASE ARM | first=",TimeToString(first)," | bars=8 | low=",low," | high=",high);
+               Print("SN365 FIX3 BASE ARM | first=",TimeToString(first)," | bars=8 | low=",low," | high=",high);
             }
          }
       }
@@ -1621,10 +1622,10 @@ void CheckBaseStopSetup() {
       if(BaseStopFilledSince(now,module,historyReady)) {
          G_BaseConsumed=true; G_BaseStageReady=false; CancelBaseStopOrders(); return;
       }
-      if(!historyReady) { SafetyLog("FIX2 BASE: fill history unavailable; retry pending"); return; }
+      if(!historyReady) { SafetyLog("FIX3 BASE: fill history unavailable; retry pending"); return; }
       double entry=0,sl=0;
       if(!Stage1Geometry(side,G_BaseLow,G_BaseHigh,BaseInitialSLPips*BasePipSize,entry,sl)) continue;
-      Print("SN365 FIX2 BASE TRY | module=",module," | trigger=",DoubleToString(entry,_Digits),
+      Print("SN365 FIX3 BASE TRY | module=",module," | trigger=",DoubleToString(entry,_Digits),
          " | initialSL=",DoubleToString(sl,_Digits)," | TP=none");
       SubmitEntry(side,true,entry,sl,module,0,1,0);
    }
