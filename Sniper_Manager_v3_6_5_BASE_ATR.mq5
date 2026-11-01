@@ -6,7 +6,7 @@
 //+------------------------------------------------------------------+
 #property strict
 #property version "3.65"
-#property description "3.6.5 working revision: BASE closed breakout, swing SL, dynamic 2 ATR TP"
+#property description "3.6.5 BASE ATR + D1 .790 / M15 OB reclaim; build OTE-1"
 #include <Trade\Trade.mqh>
 #include <Canvas\Canvas.mqh>
 
@@ -79,8 +79,10 @@ input bool ShowChartPriceCaptions = true; // Short, spaced captions; full detail
 input bool EnableSMC_EMA = true;
 input bool EnableSMC_Comp = true; // Includes paired Compression limit
 input bool EnableSMC_OTE = true;
-input bool RequireOTEReclaim = false; // Closed-candle sweep + return; false restores legacy touch entry
-input bool AllowOTEReclaimAgainstH4 = false; // Separate permission; exactly half dynamic cash risk
+input bool RequireOTEReclaim = true; // D1 .790 sweep + closed M15 return + held H4 OB; false restores legacy touch entry
+input bool AllowOTEReclaimAgainstH4 = true; // Separate permission; exactly half dynamic cash risk
+input int OTEReclaimMaxBars = 4; // Including the sweep candle: at most one hour on M15
+input double OTEReclaimMaxDistanceATR = 0.5; // Maximum entry distance above/below D1 .790
 input bool EnableSMC_Sweep = true;
 input bool EnableSMC_Base = true;
 input bool BaseRequireVolumeSpike = false; // Closed breakout is sufficient; optional old volume filter
@@ -119,6 +121,7 @@ double G_Struct_High = 0.0, G_Struct_Low = 0.0;
 datetime G_LastBarTime = 0, G_LastBuyTime = 0, G_LastSellTime = 0;
 
 int h_atr, h_atr_ma;
+int h_ote_atr=INVALID_HANDLE;
 int h_ema21, h_ema55, h_ema200;
 
 // --- Переменные для MTF ---
@@ -222,6 +225,14 @@ datetime G_CompDay=0,G_CompRetryAt=0;
 int G_CompDirection=0;
 datetime G_OTEReclaimCheckedBar=0,G_OTEReclaimSignalBar=0,G_OTEReclaimDay=0;
 int G_OTEReclaimSide=-1;
+struct OTEReclaimState {
+   bool active; int bars; double obLow,obHigh,extreme;
+   datetime obTime,confirmedAt,sweepTime,lastTime;
+};
+OTEReclaimState G_OTEReclaim;
+datetime G_OTEContextDay=0;
+double G_OTEContextLow=0,G_OTEContextHigh=0;
+int G_OTEContextDirection=0;
 bool G_BaseArmed=false,G_BaseConsumed=false;
 double G_BaseHigh=0,G_BaseLow=0;
 datetime G_BaseStarted=0,G_BaseArmedBar=0,G_BaseCheckedBar=0;
@@ -290,13 +301,15 @@ void DeleteOrdersByComment(string comment_str);
 //| INITIALIZATION                                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   Print("SN36 VISUAL/AUDIT 3.65 | strict defaults | optional module/OTE controls | wall-clock rendering");
+   Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | build OTE-1");
    ResetSignalAudit();
    G_VisualEnabled=!MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_VISUAL_MODE);
    InitVisualNamespace();
    if(!MathIsValidNumber(DailyLossLimitPercent) || MagicNumber==0 || EntryDelayMinutes<0 || StopLossPoints<=0 || InvalidationPoints<=0 ||
       Fractal_Strength<1 || Vol_SMA_Period<1 || DailyLossLimitPercent<0 || MaxStructureAgeBars<0 || VisualRefreshSeconds<1 || TesterVisualFrameMs<100 || LiveVisualFrameMs<100 ||
       (!MathIsValidNumber(CounterTrendRiskMult) || CounterTrendRiskMult<=0 || CounterTrendRiskMult>1) ||
+      OTEReclaimMaxBars<1 || OTEReclaimMaxBars>96 || (EnableSMC_OTE && RequireOTEReclaim && MinSweepPoints<1) ||
+      !MathIsValidNumber(OTEReclaimMaxDistanceATR) || OTEReclaimMaxDistanceATR<=0 || OTEReclaimMaxDistanceATR>5 ||
       BaseSwingStrength<1 || BaseSwingStrength>20 || BaseSwingLookback<2*BaseSwingStrength+2 ||
       BaseSwingLookback>2000 || BaseSLBufferPoints<1 || BaseMaxWaitBars<1 ||
       InfoFontSize<8 || InfoFontSize>24 || InfoWidthPercent<30 || InfoWidthPercent>100 || InfoRightMarginPx<0 ||
@@ -324,6 +337,7 @@ int OnInit() {
    SF_LastClosed=0; SF_ActivePrefix=SF_Prefix; SF_Clear();
 
    if(MQLInfoInteger(MQL_TESTER)) TesterHideIndicators(!ShowTesterIndicatorWindows);
+   if(EnableSMC_OTE && RequireOTEReclaim) h_ote_atr=iATR(_Symbol,PERIOD_M15,ATR_Period);
    h_atr = iATR(_Symbol, _Period, ATR_Period);
    h_atr_ma = iMA(_Symbol, _Period, ATR_MA_Period, 0, MODE_SMA, h_atr);
 
@@ -340,7 +354,7 @@ int OnInit() {
       h_mtf_ema200[i]= iMA(_Symbol, mtf_tfs[i], 200, 0, MODE_EMA, PRICE_CLOSE);
    }
 
-   if(h_atr==INVALID_HANDLE || h_atr_ma==INVALID_HANDLE || h_ema21==INVALID_HANDLE ||
+   if((EnableSMC_OTE && RequireOTEReclaim && h_ote_atr==INVALID_HANDLE) || h_atr==INVALID_HANDLE || h_atr_ma==INVALID_HANDLE || h_ema21==INVALID_HANDLE ||
       h_ema55==INVALID_HANDLE || h_ema200==INVALID_HANDLE) return INIT_FAILED;
    for(int i=0;i<6;i++)
       if(h_mtf_rsi[i]==INVALID_HANDLE || h_mtf_stoch[i]==INVALID_HANDLE || h_mtf_macd[i]==INVALID_HANDLE ||
@@ -358,6 +372,7 @@ void OnDeinit(const int reason) {
    if(!DiagnosticMode && G_InstanceLock!=INVALID_HANDLE) DeleteOrdersByComment(""); // Own pending must not survive removal/input changes.
    if(G_InstanceLock!=INVALID_HANDLE) { FileClose(G_InstanceLock); G_InstanceLock=INVALID_HANDLE; }
    IndicatorRelease(h_atr); IndicatorRelease(h_atr_ma);
+   if(h_ote_atr!=INVALID_HANDLE) IndicatorRelease(h_ote_atr);
    IndicatorRelease(h_ema21); IndicatorRelease(h_ema55); IndicatorRelease(h_ema200);
 
    for(int i = 0; i < 6; i++) {
@@ -1413,49 +1428,131 @@ void CheckPredictiveZone() {
    }
 }
 
-// Closed-candle predicate, independent of chart objects and tick volume.
-// Sweep level must belong to the unchanged D1 deep OTE .790-1.000 zone.
-bool OTEReclaimPattern(bool buy,double zoneLow,double zoneHigh,double reference,
-                       double barLow,double barHigh,double barClose,double minimumSweep) {
-   if(!Positive(zoneLow) || !Positive(zoneHigh) || zoneHigh<=zoneLow ||
-      !Positive(reference) || reference<zoneLow || reference>zoneHigh ||
-      !Positive(barLow) || !Positive(barHigh) || !Positive(barClose) ||
-      barHigh<barLow || barClose<barLow || barClose>barHigh ||
-      !MathIsValidNumber(minimumSweep) || minimumSweep<=0) return false;
-   return buy?(barLow<=reference-minimumSweep && barClose>reference):
-              (barHigh>=reference+minimumSweep && barClose<reference);
+// Freeze only H4 blocks whose displacement was closed before the M15 sweep opened.
+// Visual H4 zones are deliberately unchanged: trade confirmation uses close-based invalidation.
+bool FindOTEOrderBlock(const MqlRates &rates[],bool buy,datetime before,
+                       double zoneLow,double zoneHigh,double sweepLow,double sweepHigh,
+                       double &obLow,double &obHigh,datetime &obTime,datetime &confirmedAt) {
+   obLow=0; obHigh=0; obTime=0; confirmedAt=0;
+   int seconds=PeriodSeconds(PERIOD_H4);
+   for(int i=0;i+1<ArraySize(rates);i++) {
+      if(rates[i].time<=0 || rates[i].time+seconds>before) continue;
+      double low=rates[i+1].low,high=rates[i+1].high;
+      if(!Positive(low) || !Positive(high) || high<=low ||
+         rates[i+1].time>=rates[i].time || high<zoneLow || low>zoneHigh ||
+         sweepHigh<low || sweepLow>high) continue;
+      bool formed=buy?(rates[i+1].close<rates[i+1].open && rates[i].close>high):
+                      (rates[i+1].close>rates[i+1].open && rates[i].close<low);
+      if(!formed) continue;
+      bool held=true;
+      for(int j=i-1;j>=0;j--) {
+         if(rates[j].time+seconds>before) continue;
+         if(!Positive(rates[j].close) || (buy?rates[j].close<low:rates[j].close>high)) {
+            held=false; break;
+         }
+      }
+      if(!held) continue;
+      obLow=low; obHigh=high; obTime=rates[i+1].time; confirmedAt=rates[i].time+seconds; return true;
+   }
+   return false;
+}
+
+// Returns 1 for a confirmed return, 0 for waiting, -1 invalidated, -2 expired.
+int AdvanceOTEReclaim(OTEReclaimState &state,bool buy,const MqlRates &bar,double level,int maxBars) {
+   if(!state.active) return 0;
+   state.bars++;
+   if(state.bars>maxBars || bar.time-state.sweepTime>=(long)maxBars*PeriodSeconds(PERIOD_M15)) { state.active=false; return -2; }
+   if(state.bars>1 && bar.time-state.lastTime!=PeriodSeconds(PERIOD_M15)) { state.active=false; return -1; }
+   state.lastTime=bar.time;
+   if(!Positive(bar.low) || !Positive(bar.high) || !Positive(bar.open) || !Positive(bar.close) ||
+      bar.high<bar.low || bar.close<bar.low || bar.close>bar.high) { state.active=false; return -1; }
+   state.extreme=buy?MathMin(state.extreme,bar.low):MathMax(state.extreme,bar.high);
+   if(buy?bar.close<state.obLow:bar.close>state.obHigh) { state.active=false; return -1; }
+   if(buy?(bar.close>level && bar.close>bar.open):(bar.close<level && bar.close<bar.open)) {
+      state.active=false; return 1;
+   }
+   return 0;
+}
+
+bool OTEReclaimQuoteAllowed(bool buy,double bid,double ask,double level,double atr,double multiple) {
+   if(!Positive(bid) || !Positive(ask) || ask<bid || !Positive(level) || !Positive(atr) || !Positive(multiple)) return false;
+   // Return ABOVE .790 for BUY is intentional: do not require price to remain in the old deep zone.
+   return buy?(bid>level && ask-level<=atr*multiple):(ask<level && level-bid<=atr*multiple);
 }
 
 void CheckOTEReclaim() {
-   if(!RequireOTEReclaim || !EnableSMC_OTE || !G_D1_DataReady || !G_D1_Valid) return;
+   if(!RequireOTEReclaim || !EnableSMC_OTE || !G_D1_DataReady || !G_D1_Valid) {
+      G_OTEReclaim.active=false; G_OTEReclaimSignalBar=0; return;
+   }
+   if(G_OTEContextDay!=G_D1_SourceDay || G_OTEContextLow!=G_Struct_Low ||
+      G_OTEContextHigh!=G_Struct_High || G_OTEContextDirection!=G_D1_Direction) {
+      G_OTEReclaim.active=false; G_OTEReclaimSignalBar=0;
+      G_OTEContextDay=G_D1_SourceDay; G_OTEContextLow=G_Struct_Low;
+      G_OTEContextHigh=G_Struct_High; G_OTEContextDirection=G_D1_Direction;
+   }
    if(!SeriesInfoInteger(_Symbol,PERIOD_M15,SERIES_SYNCHRONIZED)) return;
    MqlRates bars[]; ArraySetAsSeries(bars,true);
-   if(CopyRates(_Symbol,PERIOD_M15,1,2,bars)!=2) return;
+   double atr[];
+   if(CopyRates(_Symbol,PERIOD_M15,1,2,bars)!=2 || CopyBuffer(h_ote_atr,0,1,1,atr)!=1 || !Positive(atr[0])) return;
    datetime closed=bars[0].time;
-   if(closed<=0 || closed==G_OTEReclaimCheckedBar || bars[1].time>=closed) return;
-   G_OTEReclaimCheckedBar=closed; // At most one attempt for this closed-candle confirmation.
+   if(closed<=0 || closed==G_OTEReclaimCheckedBar || bars[1].time>=closed || !Positive(bars[1].close)) return;
+   G_OTEReclaimCheckedBar=closed;
    G_OTEReclaimSignalBar=0; G_OTEReclaimSide=-1;
-   if(closed<G_D1_SourceDay || MinSweepPoints<=0) return;
+   if(closed<G_D1_SourceDay) { G_OTEReclaim.active=false; return; }
    bool buy=G_D1_Direction==1;
-   double low=0,high=0;
-   if(!TradeOTE(buy?G_Struct_Low:G_Struct_High,buy?G_Struct_High:G_Struct_Low,low,high)) return;
-   double level=buy?bars[1].low:bars[1].high;
-   if(!OTEReclaimPattern(buy,low,high,level,bars[0].low,bars[0].high,
-                        bars[0].close,MinSweepPoints*_Point)) return;
-   // Preserve the existing OTE invalidation distance; do not revive an invalidated zone.
-   if((buy && bars[0].low<low-InvalidationPoints*_Point) ||
-      (!buy && bars[0].high>high+InvalidationPoints*_Point)) return;
+   double level=G_Fibo_790;
+   if(!Positive(level)) return;
+   if(!G_OTEReclaim.active) {
+      bool sweep=buy?(bars[1].close>=level && bars[0].low<=level-MinSweepPoints*_Point):
+                     (bars[1].close<=level && bars[0].high>=level+MinSweepPoints*_Point);
+      if(!sweep) return;
+      double zoneLow=0,zoneHigh=0;
+      if(!TradeOTE(buy?G_Struct_Low:G_Struct_High,buy?G_Struct_High:G_Struct_Low,zoneLow,zoneHigh)) return;
+      if(!SeriesInfoInteger(_Symbol,PERIOD_H4,SERIES_SYNCHRONIZED)) {
+         SafetyLog("SMC_OTE_Reclaim: H4 OB history not synchronized"); return;
+      }
+      MqlRates h4[]; ArraySetAsSeries(h4,true);
+      int copied=CopyRates(_Symbol,PERIOD_H4,0,200,h4);
+      if(copied<3 || !FindOTEOrderBlock(h4,buy,closed,zoneLow,zoneHigh,bars[0].low,bars[0].high,
+         G_OTEReclaim.obLow,G_OTEReclaim.obHigh,G_OTEReclaim.obTime,G_OTEReclaim.confirmedAt)) {
+         SafetyLog("SMC_OTE_Reclaim: no pre-existing overlapping held H4 OB"); return;
+      }
+      // Check intervening closed M15 candles: the block must not have been invalidated before this sweep.
+      int shift=iBarShift(_Symbol,PERIOD_M15,G_OTEReclaim.confirmedAt,false);
+      if(shift<1 || shift>2000) { SafetyLog("SMC_OTE_Reclaim: OB M15 validation history unavailable"); return; }
+      MqlRates history[]; ArraySetAsSeries(history,true);
+      if(CopyRates(_Symbol,PERIOD_M15,2,shift,history)!=shift) {
+         SafetyLog("SMC_OTE_Reclaim: incomplete OB M15 validation history"); return;
+      }
+      for(int k=0;k<ArraySize(history);k++) {
+         if(history[k].time<G_OTEReclaim.confirmedAt || history[k].time>=closed) continue;
+         if(!Positive(history[k].close) || (buy?history[k].close<G_OTEReclaim.obLow:history[k].close>G_OTEReclaim.obHigh)) {
+            SafetyLog("SMC_OTE_Reclaim: OB previously invalidated by M15 close"); return;
+         }
+      }
+      G_OTEReclaim.active=true; G_OTEReclaim.bars=0; G_OTEReclaim.sweepTime=closed;
+      G_OTEReclaim.extreme=buy?bars[0].low:bars[0].high;
+      Print("SN365 OTE ARM | time=",TimeToString(closed)," | level790=",DoubleToString(level,_Digits),
+         " | OB=",TimeToString(G_OTEReclaim.obTime)," | low=",DoubleToString(G_OTEReclaim.obLow,_Digits),
+         " | high=",DoubleToString(G_OTEReclaim.obHigh,_Digits));
+   }
+   int result=AdvanceOTEReclaim(G_OTEReclaim,buy,bars[0],level,OTEReclaimMaxBars);
+   if(result==-1) { SafetyLog("SMC_OTE_Reclaim: OB invalidated by M15 close / invalid candle"); return; }
+   if(result==-2) { SafetyLog("SMC_OTE_Reclaim: confirmation expired"); return; }
+   if(result!=1) return;
    int side=buy?POSITION_TYPE_BUY:POSITION_TYPE_SELL;
-   DrawDiagnosticSignal("OTE",side,closed,bars[0].close,"OTE sweep + closed return");
-   MqlTick q; if(!SymbolInfoTick(_Symbol,q) || !Positive(q.ask) || !Positive(q.bid)) return;
-   double entry=buy?q.ask:q.bid;
-   // No chasing a gap out of OTE and no entry after price loses the reclaimed level.
-   if(entry<low || entry>high || (buy?q.bid<=level:q.ask>=level)) {
-      SafetyLog("SMC_OTE_Reclaim: quote left OTE/reclaimed level"); return;
+   DrawDiagnosticSignal("OTE",side,closed,bars[0].close,"D1 .790 sweep + M15 return + held H4 OB");
+   MqlTick q;
+   if(!SymbolInfoTick(_Symbol,q) || !OTEReclaimQuoteAllowed(buy,q.bid,q.ask,level,atr[0],OTEReclaimMaxDistanceATR)) {
+      SafetyLog("SMC_OTE_Reclaim: return lost or quote exceeds M15 ATR distance"); return;
    }
    G_OTEReclaimSignalBar=closed; G_OTEReclaimDay=G_D1_SourceDay; G_OTEReclaimSide=side;
-   double sl=NormalizeDouble(buy?low-InvalidationPoints*_Point:high+InvalidationPoints*_Point,_Digits);
-   SubmitEntry(side,false,entry,sl,"SMC_OTE_Reclaim");
+   // Existing OTE exit policy is retained; BASE-specific ATR exits are not silently applied here.
+   double sl=NormalizeDouble(buy?G_Struct_Low-InvalidationPoints*_Point:
+      G_Struct_High+InvalidationPoints*_Point,_Digits);
+   Print("SN365 OTE CONFIRM | time=",TimeToString(closed)," | side=",buy?"BUY":"SELL",
+      " | M15_ATR=",DoubleToString(atr[0],_Digits)," | sweepExtreme=",DoubleToString(G_OTEReclaim.extreme,_Digits));
+   SubmitEntry(side,false,buy?q.ask:q.bid,sl,"SMC_OTE_Reclaim");
 }
 
 void CheckWickTouchesAndAlert() {

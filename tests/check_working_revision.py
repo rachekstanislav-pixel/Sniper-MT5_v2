@@ -18,7 +18,7 @@ unchanged=['GetDynamicRisk','GetDynamicGlobalRisk','SafeVolume','OwnExposure','E
 'PaintSignalViews','UpdatePreviousDayFibo','UpdateH4Zones','UpdateLegacyStructureVisuals']
 for name in unchanged:
  assert function(s,name)==function(base,name), f'Unexpected change: {name}'
-functions='\n'.join(function(s,n) for n in ['OTEReclaimPattern','DirectionAllowed','SafeVolume','CheckCompressionPhase'])
+functions='\n'.join(function(s,n) for n in ['DirectionAllowed','SafeVolume','CheckCompressionPhase'])
 functions=functions.replace('double atr_val[], atr_ma_val[];', 'std::vector<double> atr_val, atr_ma_val;')
 harness=r'''
 #include <algorithm>
@@ -102,16 +102,6 @@ int main(){
  DiagnosticMode=false;EnableSMC_Comp=false;CheckCompressionPhase();assert(successful==3);
  EnableSMC_Comp=true;EnableAutoTrade=false;CheckCompressionPhase();assert(successful==3);
  EnableAutoTrade=true;now=148;CheckCompressionPhase();assert(successful==4);
- // Actual new predicate: mirrored buy/sell reclaim, strict close, minimum sweep, zone membership.
- assert(OTEReclaimPattern(true,100,110,105,103,108,106,2));
- assert(OTEReclaimPattern(false,100,110,105,102,107,104,2));
- assert(!OTEReclaimPattern(true,100,110,105,103,108,105,2));
- assert(!OTEReclaimPattern(true,100,110,105,104,108,106,2));
- assert(!OTEReclaimPattern(false,100,110,105,102,106,104,2));
- assert(!OTEReclaimPattern(true,100,110,111,103,114,112,2));
- assert(!OTEReclaimPattern(true,100,110,105,103,108,109,2));
- assert(!OTEReclaimPattern(true,100,110,105,103,108,106,0));
- assert(!OTEReclaimPattern(true,100,110,105,103,108,106,std::numeric_limits<double>::quiet_NaN()));
  // H4 exception is scoped; missing data and stale confirmation cannot be waived.
  G_D1_SourceDay=G_OTEReclaimDay=10;SF_ConfirmedDirection=-1;string why;
  assert(!DirectionAllowed(POSITION_TYPE_BUY,why,"SMC_OTE_Reclaim"));
@@ -127,7 +117,7 @@ int main(){
  assert(SafeVolume(0,110,100,volume,0.5));assert(std::abs(volume-0.01)<1e-9);
  unitLoss=2000;assert(!SafeVolume(0,110,100,volume,0.5));assert(volume==0);
  assert(!SafeVolume(0,110,100,volume,1.5));
- std::cout<<"PASS: compression lifecycle, OTE predicate, H4 policy and dynamic volume cases\n";
+ std::cout<<"PASS: compression lifecycle, H4 policy and dynamic volume cases\n";
 }
 '''
 with tempfile.TemporaryDirectory(prefix='sniper-check-') as tmp:
