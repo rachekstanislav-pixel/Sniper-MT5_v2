@@ -6,8 +6,7 @@
 //+------------------------------------------------------------------+
 #property strict
 #property version "3.65"
-// Stage 1 from RESTORED_STOP_FIX: eight-bar BASE, 65/35, wick trail, one half exit.
-#property description "3.6.5 STAGE1 BASE 8 bars / Stop 65-35 / zone SL / wick trail / half exit; all modules enabled"
+#property description "FIX2 based on uploaded BASE_ATR_v2: right HUD, eight-bar BASE 65/35, wick trail"
 #include <Trade\Trade.mqh>
 #include <Canvas\Canvas.mqh>
 
@@ -23,9 +22,9 @@ input ulong  MagicNumber          = 777;      // Magic Number
 input int    EntryDelayMinutes    = 2;        // Задержка между входами (мин)
 
 // ===== 2. НАСТРОЙКИ УПРАВЛЕНИЯ ПОЗИЦИЯМИ (ДЛЯ ВСЕЙ КОРЗИНЫ) =====
-input int    Fixed_TakeProfit     = 1000;     // ВИРТУАЛЬНЫЙ Тейк-Профит всей пачки (в пунктах)
-input int    Physical_BE_Trigger  = 250;      // Триггер физического БУ (в пунктах)
-input int    Physical_BE_Level    = 50;       // Уровень физического БУ (в пунктах)
+input int    Fixed_TakeProfit     = 1000;     // Legacy compatibility only; FIX2 has NO fixed TP
+input int    Physical_BE_Trigger  = 250;      // Legacy compatibility only; FIX2 has NO break-even rule
+input int    Physical_BE_Level    = 50;       // Legacy compatibility only; unused by FIX2 exits
 input int    StopLossPoints       = 500;      // Дефолтный Стоп-лосс для входов ИИ (в пунктах)
 
 // ===== 3. SMC, ОБЪЕМЫ И ТРИГГЕРЫ ВХОДОВ =====
@@ -78,31 +77,26 @@ input string HudFontName = "Arial"; // Explicit font shared by measurement and l
 input int HudTopOffsetPx = 90; // Reserve space for MT5 one-click trading; 8 suits tester
 input bool ShowChartPriceCaptions = true; // Short, spaced captions; full detail in tooltips
 input bool EnableSMC_EMA = true;
-input bool EnableSMC_Comp = true; // Includes paired Compression limit
+input bool EnableSMC_Comp = false; // User disabled BOTH market Compression and its paired limit
 input bool EnableSMC_OTE = true;
 input bool RequireOTEReclaim = true; // D1 .790 sweep + closed M15 return + held H4 OB; false restores legacy touch entry
 input bool AllowOTEReclaimAgainstH4 = true; // Separate permission; exactly half dynamic cash risk
 input int OTEReclaimMaxBars = 4; // Including the sweep candle: at most one hour on M15
 input double OTEReclaimMaxDistanceATR = 0.5; // Maximum entry distance above/below D1 .790
-input bool EnableSMC_Sweep = true;
+input bool EnableSMC_Sweep = false; // User disabled standalone Sweep; OTE reclaim remains independent
 input bool EnableSMC_Base = true;
-input bool BaseAdaptiveDetection = false; // Legacy ATR mode only; Stage1 Stop always uses eight candles
-input int BaseMinBars = 6;
-input int BaseMaxBars = 24;
-input double BaseMaxRangeATR = 4.0; // Full range / ATR known BEFORE the candidate window
-input double BaseMaxEfficiency = 0.35; // Net close movement / total close-to-close path
-input double BaseMinOverlap = 0.55; // Mean overlap of adjacent candle ranges
-input bool BaseDetectionDiagnostics = false; // One result per closed candle, plus one history-warmup message
-// Stage 1 applies to newly opened BASE Stop positions only. Price units are explicit.
+// FIX2: zone entry settings; wick trailing and half exit apply to ALL own modules.
 input double BasePipSize = 0.01; // GOLD: one pip in PRICE units, independent of broker digits
 input double BaseInitialSLPips = 50.0; // Initial SL outside the BASE, adjustable
 input int BaseTrailBars = 5; // Closed M5 candles only, allowed range 3..5
 input double BaseTrailBufferPips = 0.0; // Optional offset beyond candle wicks
 input double BaseHalfExitPips = 1000.0; // Exit up to half once; remainder has no fixed TP
 input bool BaseUseStopOrders = true; // Stage1: Buy Stop at 65%, Sell Stop at 35% from zone low
-input bool BaseStopBothDirections = true; // BASE Stop only: ignore directional H4/D1 filters, retain current/valid data
+input bool BaseStopBothDirections = true;
+input int BaseEntryRetrySeconds = 5; // Retry a missing side in the SAME frozen zone, never chase price
+input int HudWidthPercent = 72; // Entire information block, right aligned
 enum BASE_TARGET_SCOPE { BASE_TARGET_H1=1, BASE_TARGET_H4=2, BASE_TARGET_H1_H4=3 };
-input BASE_TARGET_SCOPE BaseTargetScope = BASE_TARGET_H1_H4; // Legacy only; Stage1 has no fixed target
+input BASE_TARGET_SCOPE BaseTargetScope = BASE_TARGET_H1_H4; // Legacy compatibility; FIX2 uses NO fixed target
 input bool BaseRequireVolumeSpike = false; // Closed breakout is sufficient; optional old volume filter
 input int BaseSwingStrength = 2; // Confirmed local pivot: closed bars on each side
 input int BaseSwingLookback = 64;
@@ -157,6 +151,9 @@ bool   G_Compression_Active = false;
 bool   G_WickAlertedForCurrentZone = false;
 
 // --- ФОРВАРД-ДЕКЛАРАЦИИ ---
+bool G_BaseStageReady=false;
+datetime G_BaseStageDeadline=0,G_BaseStageAttempt=0;
+
 double CalculateSmartLot(double entry_price, double stop_loss);
 double GetDynamicRisk();
 double GetDynamicGlobalRisk();
@@ -194,7 +191,7 @@ double SF_ConfirmedBreak = 0.0;
 string SF_PivotStructure = "UNDEFINED"; // most recent confirmed H4 high/low classification
 string SF_Prefix = "SN24_STRUCT_";
 datetime SF_LastClosed = 0;
-datetime SF_RebuildStartTime=0; // Pin the historical simulation boundary within this instance
+datetime SF_RebuildStartTime=0;
 string SF_ActivePrefix = "SN24_STRUCT_";
 bool SF_DataReady=false;
 bool G_D1_DataReady=false;
@@ -252,11 +249,6 @@ OTEReclaimState G_OTEReclaim;
 datetime G_OTEContextDay=0;
 double G_OTEContextLow=0,G_OTEContextHigh=0;
 int G_OTEContextDirection=0;
-struct BaseZone {
-   bool valid; int bars; datetime first,last;
-   double high,low,rangeATR,efficiency,overlap;
-};
-datetime G_BaseModelCheckedBar=0,G_BaseModelDataLogBar=0;
 bool G_BaseArmed=false,G_BaseConsumed=false;
 bool G_BaseStopOCOTripped=false;
 double G_BaseHigh=0,G_BaseLow=0;
@@ -274,6 +266,7 @@ string G_DroppedViews[];
 
 
 // Pixel geometry comes from the actual configured font, including terminal DPI.
+int G_HudLeft=12;
 int G_HudWidth=0,G_HudFont=11,G_HudRow=22,G_HudColumns=6;
 int G_HudTop=0,G_SummaryY=0,G_ScopeY=0,G_DiagTop=0,G_DiagBottom=0;
 bool G_HudCompact=false;
@@ -326,12 +319,9 @@ void DeleteOrdersByComment(string comment_str);
 //| INITIALIZATION                                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   Print("SN365 STAGE1_BASE_65_35 | base=RESTORED_STOP_FIX | M5 | fixed8 | all modules enabled");
-   Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | BASE STOP / EXTREMUM mode available | build OTE-1+BASE-STOP-1 / BASE-DETECT-2 / BASE-ORDERS-2");
-   Print("SN365 BASE CONFIG | stopOrders=",BaseUseStopOrders," | bothDirections=",BaseStopBothDirections,
-      " | adaptive=",BaseAdaptiveDetection," | STAGE1 fixed8 stop65/35 | pipPrice=",BasePipSize,
-      " | SLpips=",BaseInitialSLPips," | trailM5=",BaseTrailBars," | halfPips=",BaseHalfExitPips,
-      " | TP=none | H4/D1 data + risk gates retained");
+   Print("SN365 FIX2 | BASE_ATR_v2 foundation | right HUD | all-module wick exits | 8 bars Stop65/35");
+   Print("SN365 FIX2 CONFIG | pip=",BasePipSize," | SLpips=",BaseInitialSLPips," | halfPips=",BaseHalfExitPips," | trailBars=",BaseTrailBars," | stopOrders=",BaseUseStopOrders," | compression=",EnableSMC_Comp," | standaloneSweep=",EnableSMC_Sweep);
+   Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | BASE STOP / EXTREMUM mode available | build OTE-1+BASE-STOP-1");
    ResetSignalAudit();
    G_VisualEnabled=!MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_VISUAL_MODE);
    InitVisualNamespace();
@@ -342,10 +332,7 @@ int OnInit() {
       !MathIsValidNumber(OTEReclaimMaxDistanceATR) || OTEReclaimMaxDistanceATR<=0 || OTEReclaimMaxDistanceATR>5 ||
       !Positive(BasePipSize) || !Positive(BaseInitialSLPips) || !Positive(BaseHalfExitPips) ||
       BaseTrailBars<3 || BaseTrailBars>5 || !MathIsValidNumber(BaseTrailBufferPips) || BaseTrailBufferPips<0 ||
-      BaseMinBars<4 || BaseMaxBars<BaseMinBars || BaseMaxBars>128 ||
-      !MathIsValidNumber(BaseMaxRangeATR) || BaseMaxRangeATR<=0 || BaseMaxRangeATR>20 ||
-      !MathIsValidNumber(BaseMaxEfficiency) || BaseMaxEfficiency<0 || BaseMaxEfficiency>1 ||
-      !MathIsValidNumber(BaseMinOverlap) || BaseMinOverlap<0 || BaseMinOverlap>1 ||
+      BaseEntryRetrySeconds<1 || BaseEntryRetrySeconds>300 || HudWidthPercent<30 || HudWidthPercent>100 ||
       BaseSwingStrength<1 || BaseSwingStrength>20 || BaseSwingLookback<2*BaseSwingStrength+2 ||
       BaseSwingLookback>2000 || (int)BaseTargetScope<1 || (int)BaseTargetScope>3 || BaseSLBufferPoints<1 || BaseMaxWaitBars<1 ||
       InfoFontSize<8 || InfoFontSize>24 || InfoWidthPercent<30 || InfoWidthPercent>100 || InfoRightMarginPx<0 ||
@@ -595,17 +582,6 @@ bool SF_Low(int shift) {
    for(int j=1;j<=SF_LeftBars;j++) if(SF_Rates[shift+j].low<=v) return false;
    for(int j=1;j<=SF_RightBars;j++) if(SF_Rates[shift-j].low<=v) return false;
    return true;
-}
-
-// Keep the same chronological reconstruction start as the window advances.
-// Changing the start can remove a reference pivot and make an already-confirmed event disappear.
-int SF_RequiredLookback(int configured,int available,int left,int pinnedShift,int savedShift) {
-   if(configured<1 || available<=left+1 || pinnedShift<0 || savedShift<0) return 0;
-   int wanted=configured;
-   if(pinnedShift>0) wanted=MathMax(wanted,pinnedShift);
-   else if(savedShift>0) wanted=MathMax(wanted,savedShift+configured);
-   if(wanted>5000 || wanted+left+1>available) return 0; // Fail closed while necessary history is unavailable.
-   return wanted;
 }
 
 void SF_Update()
@@ -1335,84 +1311,6 @@ void CheckEMATouchLive() {
    }
 }
 
-// All rates/ATR inputs are closed bars, newest first. ATR[n] predates the entire n-bar window.
-bool EvaluateBaseWindow(const MqlRates &rates[],const double &atr[],int n,int seconds,
-                        double maxRangeATR,double maxEfficiency,double minOverlap,
-                        BaseZone &zone,string &why) {
-   BaseZone empty={}; zone=empty; why="";
-   if(n<2 || ArraySize(rates)<n || ArraySize(atr)<=n || seconds<=0 || !Positive(atr[n])) {
-      why="DATA"; return false;
-   }
-   zone.bars=n; zone.first=rates[n-1].time; zone.last=rates[0].time;
-   zone.high=rates[0].high; zone.low=rates[0].low;
-   double path=0,overlap=0;
-   for(int k=0;k<n;k++) {
-      if(rates[k].time<=0 || !Positive(rates[k].high) || !Positive(rates[k].low) ||
-         !Positive(rates[k].open) || !Positive(rates[k].close) || rates[k].high<rates[k].low ||
-         rates[k].open<rates[k].low || rates[k].open>rates[k].high ||
-         rates[k].close<rates[k].low || rates[k].close>rates[k].high) { why="INVALID_OHLC"; return false; }
-      zone.high=MathMax(zone.high,rates[k].high); zone.low=MathMin(zone.low,rates[k].low);
-      if(k==0) continue;
-      if(rates[k-1].time-rates[k].time!=seconds) { why="SESSION_GAP"; return false; }
-      path+=MathAbs(rates[k-1].close-rates[k].close);
-      double width=MathMin(rates[k-1].high-rates[k-1].low,rates[k].high-rates[k].low);
-      double intersection=MathMax(0,MathMin(rates[k-1].high,rates[k].high)-MathMax(rates[k-1].low,rates[k].low));
-      if(width>0) overlap+=MathMin(1.0,intersection/width);
-      else if(MathMax(rates[k-1].low,rates[k].low)<=MathMin(rates[k-1].high,rates[k].high)) overlap+=1.0;
-   }
-   if(!MathIsValidNumber(path) || !Positive(zone.high-zone.low)) { why="ZERO_OR_INVALID_RANGE"; return false; }
-   zone.rangeATR=(zone.high-zone.low)/atr[n];
-   zone.efficiency=path>0?MathAbs(rates[0].close-rates[n-1].close)/path:0;
-   zone.overlap=overlap/(n-1);
-   if(zone.rangeATR>maxRangeATR) { why="RANGE_ATR"; return false; }
-   if(zone.efficiency>maxEfficiency) { why="DIRECTIONAL_DRIFT"; return false; }
-   if(zone.overlap<minOverlap) { why="LOW_OVERLAP"; return false; }
-   zone.valid=true; why="CONSOLIDATION"; return true;
-}
-
-bool SelectBaseZone(const MqlRates &rates[],const double &atr[],int minBars,int maxBars,int seconds,
-                    double maxRangeATR,double maxEfficiency,double minOverlap,BaseZone &zone,string &why) {
-   // Prefer the longest eligible window; candidates never use future bars or a breakout candle.
-   for(int n=maxBars;n>=minBars;n--)
-      if(EvaluateBaseWindow(rates,atr,n,seconds,maxRangeATR,maxEfficiency,minOverlap,zone,why)) return true;
-   return false; // Metrics/reason describe the last (minimum-length) candidate, not every rejected window.
-}
-
-bool ReadBaseZone(int shift,BaseZone &zone,string &why,bool &ready) {
-   ready=false;
-   if(shift<1 || !SeriesInfoInteger(_Symbol,_Period,SERIES_SYNCHRONIZED)) { why="HISTORY_NOT_READY"; return false; }
-   MqlRates rates[]; double atr[]; ArraySetAsSeries(rates,true); ArraySetAsSeries(atr,true);
-   if(CopyRates(_Symbol,_Period,shift,BaseMaxBars,rates)!=BaseMaxBars ||
-      CopyBuffer(h_atr,0,shift,BaseMaxBars+1,atr)!=BaseMaxBars+1) { why="HISTORY_NOT_READY"; return false; }
-   for(int k=0;k<=BaseMaxBars;k++) if(!Positive(atr[k])) { why="ATR_NOT_READY"; return false; }
-   ready=true;
-   return SelectBaseZone(rates,atr,BaseMinBars,BaseMaxBars,PeriodSeconds(_Period),
-      BaseMaxRangeATR,BaseMaxEfficiency,BaseMinOverlap,zone,why);
-}
-
-void UpdateBaseZoneModel() {
-   datetime closed=iTime(_Symbol,_Period,1);
-   if(closed<=0 || closed==G_BaseModelCheckedBar) return;
-   BaseZone zone={}; string why=""; bool ready=false;
-   bool found=ReadBaseZone(1,zone,why,ready);
-   if(!ready) {
-      if(BaseDetectionDiagnostics && G_BaseModelDataLogBar!=closed) {
-         G_BaseModelDataLogBar=closed;
-         Print("SN365 BASE DETECT | time=",TimeToString(closed)," | ready=false | reason=",why);
-      }
-      return; // Retry when terminal history arrives, independently of trade-state locks.
-   }
-   G_BaseModelCheckedBar=closed;
-   if(found) DrawR("BaseZone_"+TimeToString(zone.first),zone.first,zone.high,
-      TimeCurrent()+PeriodSeconds()*10,zone.low,clrDarkGray,"BASE");
-   if(BaseDetectionDiagnostics) Print("SN365 BASE DETECT | time=",TimeToString(closed),
-      " | found=",found," | reason=",why," | bars=",zone.bars,
-      " | rangeATR=",DoubleToString(zone.rangeATR,3)," | efficiency=",DoubleToString(zone.efficiency,3),
-      " | overlap=",DoubleToString(zone.overlap,3)," | low=",DoubleToString(zone.low,_Digits),
-      " | high=",DoubleToString(zone.high,_Digits));
-}
-
-// Stage 1 geometry is always measured from the LOWER boundary of the full range.
 bool Stage1Geometry(int side,double low,double high,double buffer,double &entry,double &sl) {
    entry=0; sl=0;
    if((side!=POSITION_TYPE_BUY && side!=POSITION_TYPE_SELL) || !Positive(low) ||
@@ -1438,7 +1336,6 @@ bool Stage1WickStop(const MqlRates &bars[],int side,int count,double buffer,doub
    return Positive(sl);
 }
 
-// Never round UP a half lot, never create an invalid remainder, never raise entry risk.
 double Stage1HalfVolume(double initial,double current,double step,double minimum) {
    if(!Positive(initial) || !Positive(current) || !Positive(step) || !Positive(minimum) || current>initial+1e-8) return 0;
    double half=NormalizeDouble(MathFloor((initial*0.5+1e-10)/step)*step,8);
@@ -1451,6 +1348,118 @@ double Stage1HalfVolume(double initial,double current,double step,double minimum
 bool IsStage1BaseModule(string module) {
    return StringFind(module,"SMC_B65:")==0 || StringFind(module,"SMC_S35:")==0;
 }
+
+void LogEntrySizeFailure(string module,int side,double entry,double sl,double multiplier) {
+   double minimum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),minimumLoss=0;
+   double budget=AccountInfoDouble(ACCOUNT_BALANCE)*GetDynamicRisk()/100.0*multiplier;
+   bool known=Positive(minimum) && LossAtSL(side,minimum,entry,sl,minimumLoss) && Positive(minimumLoss);
+   string reason=(known && minimumLoss>budget+1e-8)?"MIN_LOT_RISK":"SIZING_PROPERTIES_OR_ROUNDING";
+   SafetyLog(module+": "+reason+(known?(" minLoss="+DoubleToString(minimumLoss,2)+" allowed="+DoubleToString(budget,2)):""));
+   Print("SN365 SIZE BLOCK | module=",module," | code=",reason," | balance=",DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2),
+      " | entry=",DoubleToString(entry,_Digits)," | sl=",DoubleToString(sl,_Digits),
+      " | minLot=",DoubleToString(minimum,8)," | minLotLossKnown=",known," | minLotLoss=",DoubleToString(minimumLoss,2),
+      " | allowedCash=",DoubleToString(budget,2)," | riskMultiplier=",DoubleToString(multiplier,3),
+      " | point=",DoubleToString(_Point,8)," | tickSize=",DoubleToString(SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE),8));
+}
+
+void Stage1TryHalfExit(ulong ticket) {
+   if(!TradingMutationAllowed() || G_InstanceLock==INVALID_HANDLE || !IsOwnPosition(ticket) ||
+      !HedgingAccount()) return;
+   bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
+   double entry=PositionGetDouble(POSITION_PRICE_OPEN),current=PositionGetDouble(POSITION_VOLUME);
+   ulong identifier=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   MqlTick q;
+   if(identifier==0 || !SymbolInfoTick(_Symbol,q) || !Positive(q.bid) || !Positive(q.ask) ||
+      (buy?q.bid-entry:entry-q.ask)<BaseHalfExitPips*BasePipSize) return;
+   static datetime retryAfter=0;
+   if(TimeCurrent()<retryAfter) return;
+   string claim=G_StateFile+".half."+IntegerToString((long)identifier);
+   if(FileIsExist(claim,FILE_COMMON)) return;
+   if(!HistorySelectByPosition(identifier)) return;
+   double initial=0,exited=0;
+   for(int i=0;i<HistoryDealsTotal();i++) {
+      ulong deal=HistoryDealGetTicket(i);
+      if(deal==0) return;
+      long type=HistoryDealGetInteger(deal,DEAL_TYPE);
+      if(type!=DEAL_TYPE_BUY && type!=DEAL_TYPE_SELL) continue;
+      if(HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol ||
+         (ulong)HistoryDealGetInteger(deal,DEAL_POSITION_ID)!=identifier) return;
+      long kind=HistoryDealGetInteger(deal,DEAL_ENTRY);
+      double volume=HistoryDealGetDouble(deal,DEAL_VOLUME);
+      if(!Positive(volume)) return;
+      if(kind==DEAL_ENTRY_IN) {
+         if((ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)!=MagicNumber) return;
+         initial+=volume;
+      } else if(kind==DEAL_ENTRY_OUT || kind==DEAL_ENTRY_OUT_BY) exited+=volume;
+      else return; // Reversals are unsupported; never infer an initial volume from them.
+   }
+   if(!IsOwnPosition(ticket) || MathAbs(initial-exited-PositionGetDouble(POSITION_VOLUME))>1e-8) return;
+   current=PositionGetDouble(POSITION_VOLUME);
+   double volume=Stage1HalfVolume(initial,current,SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP),
+      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN));
+   if(!Positive(volume)) return; // Minimum lot remains under the wick trail, with no forced full exit.
+   int h=FileOpen(claim,FILE_WRITE|FILE_BIN|FILE_COMMON);
+   if(h==INVALID_HANDLE) { SafetyLog("STAGE1: cannot persist half-exit claim"); return; }
+   ResetLastError();
+   uint written=FileWriteLong(h,(long)identifier); FileFlush(h);
+   int writeError=GetLastError(); FileClose(h);
+   if(written!=8 || writeError!=0) {
+      FileDelete(claim,FILE_COMMON); // No broker request was made; a later safe retry is allowed.
+      SafetyLog("FIX2: half-exit claim write failed; no submission"); return;
+   }
+   trade.SetTypeFillingBySymbol(_Symbol);
+   bool ok=trade.PositionClosePartial(ticket,volume);
+   TradeResult(ok,false,"STAGE1 half exit (one attempt, durable)");
+   if(DefiniteEntryRejection(trade.ResultRetcode(),trade.ResultOrder(),trade.ResultDeal(),trade.ResultVolume())) {
+      FileDelete(claim,FILE_COMMON); retryAfter=TimeCurrent()+60;
+   }
+   // Keep the claim on any uncertain result. Operator reconciliation is safer than double closing.
+   Print("SN365 STAGE1 HALF | position=",identifier," | requested=",DoubleToString(volume,8),
+      " | retcode=",trade.ResultRetcode()," | claim=",claim);
+}
+
+void ManageStage1Position(ulong ticket) {
+   if(!TradingMutationAllowed() || G_InstanceLock==INVALID_HANDLE || !IsOwnPosition(ticket)) return;
+   double originalSL=PositionGetDouble(POSITION_SL);
+   if(PositionGetDouble(POSITION_TP)>0 && Positive(originalSL)) {
+      trade.SetAsyncMode(false);
+      TradeResult(trade.PositionModify(ticket,originalSL,0),false,"FIX2 remove fixed TP; SL preserved");
+   }
+   Stage1TryHalfExit(ticket);
+   if(!IsOwnPosition(ticket)) return;
+   int side=(int)PositionGetInteger(POSITION_TYPE);
+   MqlRates bars[]; ArraySetAsSeries(bars,true);
+   // Deliberately omit forming candle 0: only the latest 3..5 completed M5 candles.
+   if(!SeriesInfoInteger(_Symbol,PERIOD_M5,SERIES_SYNCHRONIZED) ||
+      CopyRates(_Symbol,PERIOD_M5,1,BaseTrailBars,bars)!=BaseTrailBars) return;
+   double sl=0;
+   if(Stage1WickStop(bars,side,BaseTrailBars,BaseTrailBufferPips*BasePipSize,sl))
+      SafeModify(ticket,sl,0); // Tightens only; no entry-price/BE rule, no fixed TP.
+}
+
+int SF_RequiredLookback(int configured,int available,int left,int pinnedShift,int savedShift) {
+   if(configured<1 || available<=left+1 || pinnedShift<0 || savedShift<0) return 0;
+   int wanted=configured;
+   if(pinnedShift>0) wanted=MathMax(wanted,pinnedShift);
+   else if(savedShift>0) wanted=MathMax(wanted,savedShift+configured);
+   if(wanted>5000 || wanted+left+1>available) return 0; // Fail closed while necessary history is unavailable.
+   return wanted;
+}
+
+void PaintStage1Midlines() {
+   if(!BaseUseStopOrders) return;
+   for(int i=0;i<ArraySize(G_BaseViews);i++) {
+      if(G_BaseViews[i].text!="BASE") continue;
+      double middle=(G_BaseViews[i].high+G_BaseViews[i].low)*0.5;
+      CreateStructLine(G_BaseViews[i].name+"_HALF",G_BaseViews[i].first,middle,
+         G_BaseViews[i].last,middle,clrSilver,"BASE 50%");
+      double width=G_BaseViews[i].high-G_BaseViews[i].low;
+      double buy=G_BaseViews[i].low+0.65*width,sell=G_BaseViews[i].low+0.35*width;
+      CreateStructLine(G_BaseViews[i].name+"_B65",G_BaseViews[i].first,buy,G_BaseViews[i].last,buy,clrLime,"Buy Stop 65%");
+      CreateStructLine(G_BaseViews[i].name+"_S35",G_BaseViews[i].first,sell,G_BaseViews[i].last,sell,clrOrange,"Sell Stop 35%");
+   }
+}
+
 bool IsBaseStopModule(string module) {
    return IsStage1BaseModule(module) || module=="SMC_Base_Stop_B" || module=="SMC_Base_Stop_S" ||
       StringFind(module,"SMC_Base_Stop_B:")==0 || StringFind(module,"SMC_Base_Stop_S:")==0;
@@ -1547,46 +1556,76 @@ bool BaseStopFilledSince(datetime since,string expectedComment,bool &historyRead
    return false;
 }
 
+bool Stage1HasPending(string module) {
+   for(int i=OrdersTotal()-1;i>=0;i--) {
+      ulong t=OrderGetTicket(i);
+      if(IsOwnOrder(t) && OrderGetString(ORDER_COMMENT)==module) return true;
+   }
+   return false;
+}
+
+bool Stage1SameConsumedZone(datetime candidate,datetime previous,bool consumed) {
+   return consumed && candidate==previous; // Never compare a NEW zone's price with OLD bounds.
+}
+
 void CheckBaseStopSetup() {
    AuditModuleCall(AUDIT_BASE);
    if(!SeriesInfoInteger(_Symbol,_Period,SERIES_SYNCHRONIZED)) return;
-   datetime closed=iTime(_Symbol,_Period,1);
-   if(closed<=0 || closed==G_BaseCheckedBar) return;
-   double high=0,low=0,c1=iClose(_Symbol,_Period,1);
-   datetime first=0;
-   {
+   datetime closed=iTime(_Symbol,_Period,1),now=TimeCurrent();
+   if(closed<=0) return;
+   if(BaseStopHasPosition()) {
+      G_BaseStageReady=false; G_BaseConsumed=true; CancelBaseStopOrders(); return;
+   }
+   if(G_BaseStopOCOTripped) G_BaseStageReady=false;
+   if(G_BaseStageReady && now>=G_BaseStageDeadline) {
+      CancelBaseStopOrders(); G_BaseStageReady=false; G_BaseConsumed=true;
+   }
+   if(closed!=G_BaseCheckedBar) {
       double atr[];
       if(CopyBuffer(h_atr,0,1,1,atr)!=1 || !Positive(atr[0]) || Bars(_Symbol,_Period)<10) return;
       int hi=iHighest(_Symbol,_Period,MODE_HIGH,8,2),lo=iLowest(_Symbol,_Period,MODE_LOW,8,2);
       if(hi<0 || lo<0) return;
-      high=iHigh(_Symbol,_Period,hi); low=iLow(_Symbol,_Period,lo);
-      if(!Positive(low) || !Positive(high) || high<=low || high-low>=atr[0]*1.5) { G_BaseCheckedBar=closed; return; }
-      first=iTime(_Symbol,_Period,9);
-      DrawR("BaseZone_"+TimeToString(first),first,high,TimeCurrent()+PeriodSeconds()*10,low,clrDarkGray,"BASE");
-   }
-   AuditModuleRead(AUDIT_BASE);
-   if(BaseStopHasPosition()) { G_BaseCheckedBar=closed; G_BaseConsumed=true; CancelBaseStopOrders(); return; }
-   if(BaseStopHasPending()) { G_BaseCheckedBar=closed; return; } // Freeze existing order boundaries/targets until execution or expiry.
-   G_BaseStopOCOTripped=false;
-   if(!Positive(c1) || c1<low || c1>high) { G_BaseCheckedBar=closed; SafetyLog("BASE STOP: closed price already outside BASE; no chase"); return; }
-   if(G_BaseConsumed && BaseBreakoutSide(c1,G_BaseLow,G_BaseHigh)>=0) { G_BaseCheckedBar=closed; return; }
-   if(BaseRequireVolumeSpike) {
-      double sma=GetVolumeSMA(Vol_SMA_Period);
-      if(!Positive(sma) || (double)iVolume(_Symbol,_Period,1)<=sma*VolSpikeCoef) {
-         G_BaseCheckedBar=closed; SafetyLog("BASE STOP: optional volume filter not confirmed"); return;
+      double high=iHigh(_Symbol,_Period,hi),low=iLow(_Symbol,_Period,lo),c1=iClose(_Symbol,_Period,1);
+      datetime first=iTime(_Symbol,_Period,9);
+      G_BaseCheckedBar=closed;
+      bool narrow=Positive(low) && Positive(high) && high>low && high-low<atr[0]*1.5 && first>0;
+      if(narrow && (!Positive(c1) || c1<low || c1>high))
+         Print("SN365 FIX2 BASE SKIP | first=",TimeToString(first)," | last close outside zone | close=",c1," | low=",low," | high=",high);
+      if(narrow) {
+         AuditModuleRead(AUDIT_BASE);
+         DrawR("BaseZone_"+TimeToString(first),first,high,now+PeriodSeconds()*BaseMaxWaitBars,low,clrDarkGray,"BASE");
+         if(!G_BaseStageReady && !BaseStopHasPending() && !Stage1SameConsumedZone(first,G_BaseStarted,G_BaseConsumed) &&
+            Positive(c1) && c1>=low && c1<=high) {
+            bool volumeOK=true;
+            if(BaseRequireVolumeSpike) {
+               double sma=GetVolumeSMA(Vol_SMA_Period);
+               volumeOK=Positive(sma) && (double)iVolume(_Symbol,_Period,1)>sma*VolSpikeCoef;
+            }
+            if(volumeOK) {
+               G_BaseHigh=high; G_BaseLow=low; G_BaseStarted=first; G_BaseConsumed=false;
+               G_BaseStageReady=true; G_BaseStopOCOTripped=false; G_BaseStageAttempt=0;
+               G_BaseStageDeadline=now+(long)BaseMaxWaitBars*PeriodSeconds(_Period);
+               Print("SN365 FIX2 BASE ARM | first=",TimeToString(first)," | bars=8 | low=",low," | high=",high);
+            }
+         }
       }
    }
-   G_BaseCheckedBar=closed;
-   G_BaseHigh=high; G_BaseLow=low; G_BaseStarted=first; G_BaseConsumed=false;
-   if(DiagnosticMode || !EnableAutoTrade || !EnableSMC_Base) return;
+   if(!G_BaseStageReady || G_BaseConsumed || DiagnosticMode || !EnableAutoTrade || !EnableSMC_Base) return;
+   if(now<G_BaseStageAttempt || now-G_BaseStageAttempt<BaseEntryRetrySeconds) return;
+   G_BaseStageAttempt=now;
    for(int side=POSITION_TYPE_BUY;side<=POSITION_TYPE_SELL;side++) {
-      if(G_BaseStopOCOTripped || BaseStopHasPosition()) { CancelBaseStopOrders(); return; }
+      if(G_BaseStopOCOTripped || BaseStopHasPosition()) { CancelBaseStopOrders(); G_BaseStageReady=false; return; }
+      string module=(side==POSITION_TYPE_BUY?"SMC_B65:":"SMC_S35:")+IntegerToString((long)G_BaseStarted);
+      if(Stage1HasPending(module)) continue; // Retry ONLY the missing side, no duplicate orders.
+      bool historyReady=false;
+      if(BaseStopFilledSince(now,module,historyReady)) {
+         G_BaseConsumed=true; G_BaseStageReady=false; CancelBaseStopOrders(); return;
+      }
+      if(!historyReady) { SafetyLog("FIX2 BASE: fill history unavailable; retry pending"); return; }
       double entry=0,sl=0;
-      if(!Stage1Geometry(side,low,high,BaseInitialSLPips*BasePipSize,entry,sl)) continue;
-      string module=(side==POSITION_TYPE_BUY?"SMC_B65:":"SMC_S35:")+IntegerToString((long)first);
-      Print("SN365 STAGE1 BASE | bars=8 | zone=",TimeToString(first)," | module=",module,
-         " | low=",DoubleToString(low,_Digits)," | high=",DoubleToString(high,_Digits),
-         " | trigger=",DoubleToString(entry,_Digits)," | SL=",DoubleToString(sl,_Digits)," | TP=none");
+      if(!Stage1Geometry(side,G_BaseLow,G_BaseHigh,BaseInitialSLPips*BasePipSize,entry,sl)) continue;
+      Print("SN365 FIX2 BASE TRY | module=",module," | trigger=",DoubleToString(entry,_Digits),
+         " | initialSL=",DoubleToString(sl,_Digits)," | TP=none");
       SubmitEntry(side,true,entry,sl,module,0,1,0);
    }
 }
@@ -1639,38 +1678,27 @@ void CheckBaseBreakout() {
    if(closed<=0 || closed==G_BaseCheckedBar) return;
    double atr[];
    if(CopyBuffer(h_atr,0,1,1,atr)!=1 || !Positive(atr[0])) return;
-   double h8=0,l8=0,c1=iClose(_Symbol,_Period,1);
-   datetime first=0; bool narrow=false;
-   if(BaseAdaptiveDetection) {
-      BaseZone zone={}; string why=""; bool ready=false;
-      narrow=ReadBaseZone(2,zone,why,ready); // Exclude the candle that may have just broken the range.
-      if(!ready) return;
-      h8=narrow?zone.high:G_BaseHigh; l8=narrow?zone.low:G_BaseLow;
-      first=narrow?zone.first:G_BaseStarted;
-   } else {
-      int ih=iHighest(_Symbol,_Period,MODE_HIGH,8,2),il=iLowest(_Symbol,_Period,MODE_LOW,8,2);
-      if(ih<0 || il<0) return;
-      h8=iHigh(_Symbol,_Period,ih); l8=iLow(_Symbol,_Period,il);
-      first=iTime(_Symbol,_Period,9); narrow=h8-l8<atr[0]*1.5;
-      if(narrow && Positive(l8) && h8>l8)
-         DrawR("BaseZone_"+TimeToString(first),first,h8,TimeCurrent()+PeriodSeconds()*10,l8,clrDarkGray,"BASE");
-   }
-   if(!Positive(h8) || !Positive(l8) || !Positive(c1) || h8<=l8) { G_BaseCheckedBar=closed; return; }
+   int ih=iHighest(_Symbol,_Period,MODE_HIGH,8,2),il=iLowest(_Symbol,_Period,MODE_LOW,8,2);
+   if(ih<0 || il<0) return;
+   double h8=iHigh(_Symbol,_Period,ih),l8=iLow(_Symbol,_Period,il),c1=iClose(_Symbol,_Period,1);
+   if(!Positive(h8) || !Positive(l8) || !Positive(c1) || h8<=l8) return;
    G_BaseCheckedBar=closed;
    AuditModuleRead(AUDIT_BASE);
+   bool narrow=(h8-l8<atr[0]*1.5);
+   // Preserve the original BASE geometry, colours, labels and detection window.
+   if(narrow) {
+      string b_name="BaseZone_"+TimeToString(iTime(_Symbol,_Period,9));
+      DrawR(b_name,iTime(_Symbol,_Period,9),h8,TimeCurrent()+PeriodSeconds()*10,l8,clrDarkGray,"BASE");
+   }
    if(G_BaseArmed) {
       int age=iBarShift(_Symbol,_Period,G_BaseArmedBar,true);
       if(age<0 || age>BaseMaxWaitBars) { G_BaseArmed=false; G_BaseConsumed=true; }
-   }
-   if(BaseAdaptiveDetection && G_BaseArmed && narrow) {
-      // The latest complete pre-breakout window is known before candle 1; never use candle 1 to widen it.
-      G_BaseHigh=h8; G_BaseLow=l8; G_BaseStarted=first; G_BaseArmedBar=iTime(_Symbol,_Period,2);
    }
    // Prefer the bounds displayed before this breakout, not a recomputed box containing the impulse.
    if(!G_BaseArmed && narrow && (!G_BaseConsumed || BaseBreakoutSide(c1,l8,h8)<0)) {
       G_BaseArmed=true; G_BaseConsumed=false;
       G_BaseHigh=h8; G_BaseLow=l8;
-      G_BaseStarted=first; G_BaseArmedBar=closed;
+      G_BaseStarted=iTime(_Symbol,_Period,9); G_BaseArmedBar=closed;
    }
    if(!G_BaseArmed) return;
    int side=BaseBreakoutSide(c1,G_BaseLow,G_BaseHigh);
@@ -1678,7 +1706,7 @@ void CheckBaseBreakout() {
       // While still inside, the most recently painted BASE becomes the next reference.
       if(narrow) {
          G_BaseHigh=h8; G_BaseLow=l8;
-         G_BaseStarted=first; G_BaseArmedBar=closed;
+         G_BaseStarted=iTime(_Symbol,_Period,9); G_BaseArmedBar=closed;
       }
       return;
    }
@@ -2070,7 +2098,6 @@ void RefreshMarketContext() {
       drawnEnd=SF_ConfirmedBreak; drawnTime=SF_ConfirmedBreakTime;
    }
    UpdatePreviousDayFibo();
-   if(BaseAdaptiveDetection && !BaseUseStopOrders) UpdateBaseZoneModel(); // Model and drawing never depend on entry permission.
 }
 
 bool OwnFloatingPNL(double &pnl) {
@@ -2223,21 +2250,6 @@ void ResolveEntryRejection(string comment) {
    SafetyLog(comment+": definitively rejected, no fill; entry retry paused 60 model seconds");
 }
 
-
-
-void LogEntrySizeFailure(string module,int side,double entry,double sl,double multiplier) {
-   double minimum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),minimumLoss=0;
-   double budget=AccountInfoDouble(ACCOUNT_BALANCE)*GetDynamicRisk()/100.0*multiplier;
-   bool known=Positive(minimum) && LossAtSL(side,minimum,entry,sl,minimumLoss) && Positive(minimumLoss);
-   string reason=(known && minimumLoss>budget+1e-8)?"MIN_LOT_RISK":"SIZING_PROPERTIES_OR_ROUNDING";
-   SafetyLog(module+": "+reason+(known?(" minLoss="+DoubleToString(minimumLoss,2)+" allowed="+DoubleToString(budget,2)):""));
-   Print("SN365 SIZE BLOCK | module=",module," | code=",reason," | balance=",DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2),
-      " | entry=",DoubleToString(entry,_Digits)," | sl=",DoubleToString(sl,_Digits),
-      " | minLot=",DoubleToString(minimum,8)," | minLotLossKnown=",known," | minLotLoss=",DoubleToString(minimumLoss,2),
-      " | allowedCash=",DoubleToString(budget,2)," | riskMultiplier=",DoubleToString(multiplier,3),
-      " | point=",DoubleToString(_Point,8)," | tickSize=",DoubleToString(SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE),8));
-}
-
 bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,string comment,double baseATR=0.0,int basePendingKind=0,double baseTarget=0.0) {
    RefreshMarketContext(); CheckEquityProtection();
    if(!EntryPolicy(side,comment,pending,false)) return false;
@@ -2259,6 +2271,8 @@ bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,st
    if(!Positive(sl) || (buy?sl>=entry:sl<=entry) || MathAbs(entry-sl)<minDistance ||
       (!pending && (buy?quote.bid-sl:sl-quote.ask)<minDistance) ||
       (pending && (baseStop?(buy?entry-quote.ask:quote.bid-entry):(buy?quote.ask-entry:entry-quote.bid))<=minDistance)) {
+      if(baseStop) Print("SN365 STOP DISTANCE | module=",comment," | entry=",entry," | SL=",sl,
+         " | bid=",quote.bid," | ask=",quote.ask," | minimum=",minDistance," | no market chase; missing side eligible for retry");
       SafetyLog(comment+": invalid side/distance/grid of entry or SL"); return false;
    }
    double tp=0;
@@ -2273,13 +2287,8 @@ bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,st
       }
 
    }
-   if(comment=="SMC_Base_ATR") {
-      if(pending) { SafetyLog("SMC_Base_ATR: pending entry unsupported"); return false; }
-      tp=BaseATRTarget(buy,entry,baseATR,tick,_Digits);
-      if(!Positive(tp) || (buy?tp-quote.bid:quote.ask-tp)<minDistance) {
-         SafetyLog("SMC_Base_ATR: invalid ATR TP / broker distance"); return false;
-      }
-   } else if(baseATR!=0) { SafetyLog("ATR TP only supported for BASE entries"); return false; }
+   if(!MathIsValidNumber(baseATR) || baseATR<0) return false;
+   tp=0; // Common wick/half-exit policy for ALL modules, no fixed native TP.
    double volume=0;
    bool counterOTE=AllowD1OTEAgainstH4 && comment=="SMC_OTE" &&
       SF_ConfirmedDirection!=(side==POSITION_TYPE_BUY?1:-1);
@@ -2452,214 +2461,15 @@ bool CanOpenLot(int type,string block_comment) {
    return EntryPolicy(type,block_comment,false,false);
 }
 
-// One durable claim per POSITION_IDENTIFIER is written BEFORE the partial-close request.
-// A restart or uncertain reply must never cause repeated halving. History also counts manual exits.
-void Stage1TryHalfExit(ulong ticket) {
-   if(!TradingMutationAllowed() || G_InstanceLock==INVALID_HANDLE || !IsOwnPosition(ticket) ||
-      !IsStage1BaseModule(PositionGetString(POSITION_COMMENT)) || !HedgingAccount()) return;
-   bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
-   double entry=PositionGetDouble(POSITION_PRICE_OPEN),current=PositionGetDouble(POSITION_VOLUME);
-   ulong identifier=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
-   MqlTick q;
-   if(identifier==0 || !SymbolInfoTick(_Symbol,q) || !Positive(q.bid) || !Positive(q.ask) ||
-      (buy?q.bid-entry:entry-q.ask)<BaseHalfExitPips*BasePipSize) return;
-   static datetime retryAfter=0;
-   if(TimeCurrent()<retryAfter) return;
-   string claim=G_StateFile+".half."+IntegerToString((long)identifier);
-   if(FileIsExist(claim,FILE_COMMON)) return;
-   if(!HistorySelectByPosition(identifier)) return;
-   double initial=0,exited=0;
-   for(int i=0;i<HistoryDealsTotal();i++) {
-      ulong deal=HistoryDealGetTicket(i);
-      if(deal==0) return;
-      long type=HistoryDealGetInteger(deal,DEAL_TYPE);
-      if(type!=DEAL_TYPE_BUY && type!=DEAL_TYPE_SELL) continue;
-      if(HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol ||
-         (ulong)HistoryDealGetInteger(deal,DEAL_POSITION_ID)!=identifier) return;
-      long kind=HistoryDealGetInteger(deal,DEAL_ENTRY);
-      double volume=HistoryDealGetDouble(deal,DEAL_VOLUME);
-      if(!Positive(volume)) return;
-      if(kind==DEAL_ENTRY_IN) {
-         if((ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)!=MagicNumber) return;
-         initial+=volume;
-      } else if(kind==DEAL_ENTRY_OUT || kind==DEAL_ENTRY_OUT_BY) exited+=volume;
-      else return; // Reversals are unsupported; never infer an initial volume from them.
-   }
-   if(!IsOwnPosition(ticket) || MathAbs(initial-exited-PositionGetDouble(POSITION_VOLUME))>1e-8) return;
-   current=PositionGetDouble(POSITION_VOLUME);
-   double volume=Stage1HalfVolume(initial,current,SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP),
-      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN));
-   if(!Positive(volume)) return; // Minimum lot remains under the wick trail, with no forced full exit.
-   int h=FileOpen(claim,FILE_WRITE|FILE_BIN|FILE_COMMON);
-   if(h==INVALID_HANDLE) { SafetyLog("STAGE1: cannot persist half-exit claim"); return; }
-   ResetLastError();
-   uint written=FileWriteLong(h,(long)identifier); FileFlush(h);
-   int writeError=GetLastError(); FileClose(h);
-   if(written!=8 || writeError!=0) { SafetyLog("STAGE1: half-exit claim write failed; no submission"); return; }
-   trade.SetTypeFillingBySymbol(_Symbol);
-   bool ok=trade.PositionClosePartial(ticket,volume);
-   TradeResult(ok,false,"STAGE1 half exit (one attempt, durable)");
-   if(DefiniteEntryRejection(trade.ResultRetcode(),trade.ResultOrder(),trade.ResultDeal(),trade.ResultVolume())) {
-      FileDelete(claim,FILE_COMMON); retryAfter=TimeCurrent()+60;
-   }
-   // Keep the claim on any uncertain result. Operator reconciliation is safer than double closing.
-   Print("SN365 STAGE1 HALF | position=",identifier," | requested=",DoubleToString(volume,8),
-      " | retcode=",trade.ResultRetcode()," | claim=",claim);
-}
-
-void ManageStage1Position(ulong ticket) {
-   if(!TradingMutationAllowed() || G_InstanceLock==INVALID_HANDLE || !IsOwnPosition(ticket) ||
-      !IsStage1BaseModule(PositionGetString(POSITION_COMMENT))) return;
-   Stage1TryHalfExit(ticket);
-   if(!IsOwnPosition(ticket)) return;
-   int side=(int)PositionGetInteger(POSITION_TYPE);
-   MqlRates bars[]; ArraySetAsSeries(bars,true);
-   // Deliberately omit forming candle 0: only the latest 3..5 completed M5 candles.
-   if(!SeriesInfoInteger(_Symbol,PERIOD_M5,SERIES_SYNCHRONIZED) ||
-      CopyRates(_Symbol,PERIOD_M5,1,BaseTrailBars,bars)!=BaseTrailBars) return;
-   double sl=0;
-   if(Stage1WickStop(bars,side,BaseTrailBars,BaseTrailBufferPips*BasePipSize,sl))
-      SafeModify(ticket,sl,0); // Tightens only; no entry-price/BE rule, no fixed TP.
-}
-
-// Stage1 uses wick trailing and one half exit. Older BASE comments retain their previous management.
-void ManageBaseATRPositions() {
-   if(!TradingMutationAllowed() || G_InstanceLock==INVALID_HANDLE || G_StopLatched || !G_StateOK || G_ExecutionUncertain) return;
-   static datetime lastATRBar=0;
-   datetime closed=iTime(_Symbol,_Period,1);
-   double atr[];
-   bool recalc=closed>0 && closed!=lastATRBar && CopyBuffer(h_atr,0,1,1,atr)==1;
-   if(recalc && !Positive(atr[0])) recalc=false;
-   MqlTick q; if(!SymbolInfoTick(_Symbol,q) || !Positive(q.bid) || !Positive(q.ask)) return;
-   double tick=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-   if(!Positive(tick)) return;
-   double distance=MathMax(SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL),
-      SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL))*_Point;
-   if(recalc) lastATRBar=closed;
-   for(int i=PositionsTotal()-1;i>=0;i--) {
-      ulong ticket=PositionGetTicket(i);
-      if(!IsOwnPosition(ticket) || !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) continue;
-      if(IsStage1BaseModule(PositionGetString(POSITION_COMMENT))) { ManageStage1Position(ticket); continue; }
-      bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
-      double entry=PositionGetDouble(POSITION_PRICE_OPEN),sl=PositionGetDouble(POSITION_SL);
-      double tp=PositionGetDouble(POSITION_TP);
-      if(!Positive(sl)) { SafetyLog("SMC_Base_ATR: missing SL; portfolio protection remains active"); continue; }
-      if(recalc && PositionGetString(POSITION_COMMENT)=="SMC_Base_ATR") {
-         double target=BaseATRTarget(buy,entry,atr[0],tick,_Digits);
-         if(!Positive(target)) { SafetyLog("SMC_Base_ATR: ATR target unavailable"); continue; }
-         if(buy?q.bid>=target:q.ask<=target) { SafeClose(ticket); continue; }
-         // Respect freeze distances for the old and new target. Never remove/widen the SL.
-         if((buy?target-q.bid:q.ask-target)>distance &&
-            (!Positive(tp) || MathAbs((buy?q.bid:q.ask)-tp)>distance) &&
-            MathAbs((buy?q.bid:q.ask)-sl)>distance && MathAbs(target-tp)>=tick/2.0) {
-            bool ok=trade.PositionModify(ticket,sl,target);
-            if(TradeResult(ok,false,"BASE ATR TP update")) tp=target;
-         }
-      }
-      if(!IsOwnPosition(ticket)) continue; // Re-read broker state after a target modification.
-      tp=PositionGetDouble(POSITION_TP);
-      double profitPoints=(buy?q.bid-entry:entry-q.ask)/_Point;
-      if(profitPoints>=Physical_BE_Trigger) {
-         double be=NormalizeDouble(entry+(buy?1:-1)*Physical_BE_Level*_Point,_Digits);
-         SafeModify(ticket,be,tp); // Existing tightening-only SL boundary, current ATR TP preserved.
-      }
-   }
-}
+// BASE ATR positions refresh their TP; BASE Stop positions keep a fixed extremum TP. Both retain individual BE.
 
 void ManagePositions() {
-   ManageBaseATRPositions();
-   double buy_vol = 0, sell_vol = 0, buy_weighted = 0, sell_weighted = 0;
-   bool has_buy = false, has_sell = false;
-
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double tick_val = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   if(!Positive(point) || !Positive(tick_size) || !Positive(tick_val) || !HedgingAccount()) {
-      SafetyLog("management: invalid symbol properties or unsupported account"); return;
+   if(!TradingMutationAllowed() || G_InstanceLock==INVALID_HANDLE || !HedgingAccount()) return;
+   // All own modules share ONE exit policy. Portfolio protection is checked separately.
+   for(int i=PositionsTotal()-1;i>=0;i--) {
+      ulong ticket=PositionGetTicket(i);
+      if(IsOwnPosition(ticket)) ManageStage1Position(ticket);
    }
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--) {
-      ulong ticket = PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber)) {
-         if(IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) continue;
-         double vol = PositionGetDouble(POSITION_VOLUME);
-         double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-         long type = PositionGetInteger(POSITION_TYPE);
-         if(type == POSITION_TYPE_BUY) { buy_vol += vol; buy_weighted += (open_price * vol); has_buy = true; }
-         else if(type == POSITION_TYPE_SELL) { sell_vol += vol; sell_weighted += (open_price * vol); has_sell = true; }
-      }
-   }
-
-   if(has_buy && buy_vol > 0) {
-      double avg_buy = buy_weighted / buy_vol;
-      double profit_pts = (bid - avg_buy) / point;
-      if(profit_pts >= Physical_BE_Trigger) {
-         double new_sl = NormalizeDouble(avg_buy + Physical_BE_Level * point, _Digits);
-         for(int i = PositionsTotal() - 1; i >= 0; i--) {
-            ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) {
-               double current_sl = PositionGetDouble(POSITION_SL);
-               double current_tp = PositionGetDouble(POSITION_TP);
-               if(current_sl < new_sl || current_sl == 0) SafeModify(ticket, new_sl, current_tp);
-            }
-         }
-      }
-      double target_tp_buy = NormalizeDouble(avg_buy + Fixed_TakeProfit * point, _Digits);
-      string line_buy = "Virtual_TP_BUY";
-      CreateFiboLine(line_buy,target_tp_buy,clrLime,STYLE_SOLID,"Basket TP BUY");
-
-      double val_per_point_buy = buy_vol * tick_val * (point / tick_size);
-      if(val_per_point_buy > 0) {
-         double pts_to_stop_buy = (balance * (GetDynamicGlobalRisk() / 100.0)) / val_per_point_buy;
-         double global_stop_buy = NormalizeDouble(avg_buy - pts_to_stop_buy * point, _Digits);
-         string gstop_buy = "Global_Stop_BUY";
-         CreateFiboLine(gstop_buy,global_stop_buy,clrFireBrick,STYLE_DOT,"Global risk reference BUY");
-      }
-      if(bid >= target_tp_buy) {
-         for(int i = PositionsTotal() - 1; i >= 0; i--) {
-            ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) SafeClose(ticket);
-         }
-
-      }
-   } else {   }
-
-   if(has_sell && sell_vol > 0) {
-      double avg_sell = sell_weighted / sell_vol;
-      double profit_pts = (avg_sell - ask) / point;
-      if(profit_pts >= Physical_BE_Trigger) {
-         double new_sl = NormalizeDouble(avg_sell - Physical_BE_Level * point, _Digits);
-         for(int i = PositionsTotal() - 1; i >= 0; i--) {
-            ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) {
-               double current_sl = PositionGetDouble(POSITION_SL);
-               double current_tp = PositionGetDouble(POSITION_TP);
-               if(current_sl > new_sl || current_sl == 0) SafeModify(ticket, new_sl, current_tp);
-            }
-         }
-      }
-      double target_tp_sell = NormalizeDouble(avg_sell - Fixed_TakeProfit * point, _Digits);
-      string line_sell = "Virtual_TP_SELL";
-      CreateFiboLine(line_sell,target_tp_sell,clrRed,STYLE_SOLID,"Basket TP SELL");
-
-      double val_per_point_sell = sell_vol * tick_val * (point / tick_size);
-      if(val_per_point_sell > 0) {
-         double pts_to_stop_sell = (balance * (GetDynamicGlobalRisk() / 100.0)) / val_per_point_sell;
-         double global_stop_sell = NormalizeDouble(avg_sell + pts_to_stop_sell * point, _Digits);
-         string gstop_sell = "Global_Stop_SELL";
-         CreateFiboLine(gstop_sell,global_stop_sell,clrFireBrick,STYLE_DOT,"Global risk reference SELL");
-      }
-      if(ask <= target_tp_sell) {
-         for(int i = PositionsTotal() - 1; i >= 0; i--) {
-            ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == MagicNumber) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && !IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) SafeClose(ticket);
-         }
-
-      }
-   } else {   }
 }
 
 void CheckEquityProtection() {
@@ -2783,6 +2593,7 @@ void ServiceVisuals(bool force=false) {
 void DropPaintedView(string name,bool painted) {
    if(!painted) return;
    ObjectDelete(0,ViewName(name+"_HALF"));
+   ObjectDelete(0,ViewName(name+"_B65")); ObjectDelete(0,ViewName(name+"_S35"));
    int n=ArraySize(G_DroppedViews);
    ArrayResize(G_DroppedViews,n+1); G_DroppedViews[n]=name;
 }
@@ -2850,23 +2661,22 @@ string FitViewText(string text,int size,int width) {
 }
 
 void UpdateHudLayout() {
-   G_HudWidth=MathMax(80,(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS)-24);
+   int chartWidth=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+   int margin=MathMin(InfoRightMarginPx,MathMax(0,chartWidth/4));
+   int available=MathMax(40,chartWidth-margin-12);
    G_HudFont=MathMax(8,HudFontSize-(DiagnosticCleanView?1:0));
-   G_HudRow=ViewTextHeight(G_HudFont)+6;
-   int cell=ViewTextWidth("H4 DIAMOND RSI 100.0  vv",G_HudFont)+24;
-   G_HudColumns=MathMax(1,MathMin(6,G_HudWidth/MathMax(1,cell)));
+   G_HudRow=ViewTextHeight(G_HudFont)+2;
+   int cell=ViewTextWidth("H4 DIAMOND RSI 100.0 DN",G_HudFont)+8;
+   int maximum=MathMax(40,available*HudWidthPercent/100);
+   G_HudColumns=maximum>=6*cell?6:(maximum>=3*cell?3:(maximum>=2*cell?2:1));
+   G_HudWidth=MathMin(available,MathMax(maximum,G_HudColumns*cell));
+   G_HudLeft=MathMax(12,chartWidth-margin-G_HudWidth);
+   G_HudCompact=false;
    G_HudTop=HudTopOffsetPx;
-   int height=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0);
-   G_HudCompact=ShowMTFDashboard && G_HudTop+((6+G_HudColumns-1)/G_HudColumns)*3*G_HudRow+6*G_HudRow>height;
-   if(G_HudCompact) {
-      cell=ViewTextWidth("H4 DISC RSI 100.0 UP | STO 100 UP | MACD -100.00 DN",G_HudFont)+24;
-      G_HudColumns=MathMax(1,MathMin(6,G_HudWidth/MathMax(1,cell)));
-      G_HudTop=MathMin(G_HudTop,MathMax(8,height/8));
-   }
    int rows=ShowMTFDashboard?(6+G_HudColumns-1)/G_HudColumns:0;
-   G_SummaryY=G_HudTop+rows*(G_HudCompact?1:3)*G_HudRow+6;
-   G_ScopeY=G_SummaryY+4*(ViewTextHeight(InfoFontSize)+5);
-   G_DiagTop=MathMax(DiagnosticTopOffsetPx,G_ScopeY+G_HudRow+10);
+   G_SummaryY=G_HudTop+rows*3*G_HudRow+4;
+   G_ScopeY=G_SummaryY+ViewTextHeight(InfoFontSize)+4;
+   G_DiagTop=MathMax(DiagnosticTopOffsetPx,G_ScopeY+G_HudRow+6);
    G_DiagBottom=G_DiagTop;
 }
 
@@ -2962,7 +2772,7 @@ void PaintPriceCaptions() {
    count=MathMin(count,capacity);
    for(int i=0;i<count;i++) positions[i]=MathMax(positions[i],i==0?top:positions[i-1]+row);
    for(int i=count-1;i>=0;i--) positions[i]=MathMin(positions[i],i==count-1?bottom:positions[i+1]-row);
-   int width=MathMin(310,G_HudWidth/2),left=G_HudWidth-width+12;
+   int width=MathMin(310,G_HudWidth/2),left=G_HudLeft+G_HudWidth-width;
    for(int i=0;i<count;i++) {
       int k=indices[i];
       string text=G_PriceCaptions[k].text+" @ "+DoubleToString(G_PriceCaptions[k].price,_Digits);
@@ -3002,7 +2812,7 @@ void ReleasePanelCanvases() {
 }
 void PaintHeaderBackground() {
    PaintTransparentPanel(G_HeaderCanvas,G_HeaderCanvasReady,G_HeaderCanvasWidth,G_HeaderCanvasHeight,
-      "HUD_BG",4,G_HudTop-4,MathMax(100,(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS)-8),
+      "HUD_BG",G_HudLeft-4,G_HudTop-4,G_HudWidth+8,
       G_ScopeY+G_HudRow-G_HudTop+4);
 }
 
@@ -3023,7 +2833,7 @@ void PaintSignalViews() {
       G_ArrowViews[i].painted=true;
    }
    datetime now=iTime(_Symbol,_Period,0);
-   if(G_Compression_Active && G_D1_Valid && G_CompHigh>G_CompLow) {
+   if(EnableSMC_Comp && G_Compression_Active && G_D1_Valid && G_CompHigh>G_CompLow) {
       DrawR("CompZone_Current",now-2*PeriodSeconds(_Period),G_CompHigh,now+5*PeriodSeconds(_Period),G_CompLow,clrDimGray,
          "Compression "+StringSubstr(EnumToString(_Period),7)+(G_Fibo_isUp?" BUY":" SELL"));
       ObjectMove(0,ViewName("Txt_CompZone_Current"),0,now-2*PeriodSeconds(_Period),G_Fibo_isUp?G_CompLow:G_CompHigh);
@@ -3033,7 +2843,7 @@ void PaintSignalViews() {
       DrawR("PredZone",iTime(_Symbol,_Period,1),G_PredZone_High,now+10*PeriodSeconds(_Period),G_PredZone_Low,
          clrDimGray,G_Fibo_isUp?"D1 TRADE OTE BUY .790-1.000":"D1 TRADE OTE SELL .790-1.000");
    else { ObjectDelete(0,ViewName("PredZone")); ObjectDelete(0,ViewName("Txt_PredZone")); }
-   if(SF_ShowStatus) SetFittedViewLabel("StructureStatus",G_StructureStatus,12,G_DiagBottom+8,clrSilver,9,G_HudWidth);
+   if(SF_ShowStatus) SetFittedViewLabel("StructureStatus",G_StructureStatus,G_HudLeft,G_DiagBottom+8,clrSilver,9,G_HudWidth);
 }
 
 void PaintReferenceViews() {
@@ -3163,7 +2973,7 @@ void UpdateD1FibonacciTool() {
       }
       if(highTime==0 || lowTime==0) {
          ObjectDelete(0,ViewName("D1_FIBO"));
-         SetViewLabel("D1_ANCHOR_WAIT","D1 native Fibo: waiting for closed M15 extreme candles",12,G_DiagBottom+ViewTextHeight(G_HudFont)+16,clrSilver,8);
+         SetViewLabel("D1_ANCHOR_WAIT","D1 native Fibo: waiting for closed M15 extreme candles",G_HudLeft,G_DiagBottom+ViewTextHeight(G_HudFont)+16,clrSilver,8);
          return;
       }
       cachedDay=G_D1_SourceDay;
@@ -3220,57 +3030,13 @@ void UpdateLegacyStructureVisuals() {
 }
 
 void PaintOwnManagementViews() {
-   double volume[2]={0,0},weighted[2]={0,0};
-   for(int i=0;i<PositionsTotal();i++) {
-      ulong ticket=PositionGetTicket(i); if(!IsOwnPosition(ticket)) continue;
-      if(IsIndividualBaseModule(PositionGetString(POSITION_COMMENT))) continue;
-      int side=(int)PositionGetInteger(POSITION_TYPE); if(side<0 || side>1) continue;
-      double v=PositionGetDouble(POSITION_VOLUME);
-      volume[side]+=v; weighted[side]+=v*PositionGetDouble(POSITION_PRICE_OPEN);
-   }
-   double tick=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE),tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
-   for(int side=0;side<2;side++) {
-      string suffix=side==0?"BUY":"SELL";
-      if(volume[side]<=0) {
-         ObjectDelete(0,ViewName("Virtual_TP_"+suffix)); ObjectDelete(0,ViewName("Global_Stop_"+suffix)); continue;
-      }
-      double avg=weighted[side]/volume[side];
-      CreateFiboLine("Virtual_TP_"+suffix,avg+(side==0?1:-1)*Fixed_TakeProfit*_Point,
-         side==0?clrLime:clrRed,STYLE_SOLID,"OWN Basket TP "+suffix);
-      if(Positive(tick) && Positive(tv)) {
-         double distance=AccountInfoDouble(ACCOUNT_BALANCE)*GetDynamicGlobalRisk()/100.0*tick/(volume[side]*tv);
-         CreateFiboLine("Global_Stop_"+suffix,avg+(side==0?-1:1)*distance,clrFireBrick,STYLE_DOT,"OWN risk reference "+suffix);
-      }
-   }
+   ObjectDelete(0,ViewName("Virtual_TP_BUY")); ObjectDelete(0,ViewName("Virtual_TP_SELL"));
+   ObjectDelete(0,ViewName("Global_Stop_BUY")); ObjectDelete(0,ViewName("Global_Stop_SELL"));
 }
 
 void UpdatePositionVisuals() {
-   // Display legacy manual+own basket arithmetic; absolutely no close/modify requests.
-   double volume[2]={0,0},weighted[2]={0,0};
-   bool manual[2]={false,false};
-   for(int i=0;i<PositionsTotal();i++) {
-      ulong ticket=PositionGetTicket(i); if(ticket==0) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      ulong magic=(ulong)PositionGetInteger(POSITION_MAGIC);
-      if(magic!=0 && magic!=MagicNumber) continue;
-      int side=(int)PositionGetInteger(POSITION_TYPE); if(side<0 || side>1) continue;
-      double v=PositionGetDouble(POSITION_VOLUME);
-      if(magic==0) manual[side]=true;
-      volume[side]+=v; weighted[side]+=v*PositionGetDouble(POSITION_PRICE_OPEN);
-   }
-   for(int side=0;side<2;side++) {
-      string suffix=side==0?"BUY":"SELL";
-      if(volume[side]<=0 || !manual[side]) { ObjectDelete(0,ViewName("View_TP_"+suffix)); ObjectDelete(0,ViewName("View_Stop_"+suffix)); continue; }
-      double avg=weighted[side]/volume[side];
-      double tp=avg+(side==0?1:-1)*Fixed_TakeProfit*_Point;
-      CreateFiboLine("View_TP_"+suffix,tp,side==0?clrLime:clrRed,STYLE_DASH,"DISPLAY ONLY manual+own Basket TP "+suffix);
-      double tick=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE),tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
-      if(Positive(tick) && Positive(tv)) {
-         double priceDistance=AccountInfoDouble(ACCOUNT_BALANCE)*GetDynamicGlobalRisk()/100.0*tick/(volume[side]*tv);
-         CreateFiboLine("View_Stop_"+suffix,avg+(side==0?-1:1)*priceDistance,clrFireBrick,STYLE_DOT,
-            "DISPLAY ONLY manual+own risk reference "+suffix+"; not broker SL or own-only stop trigger");
-      }
-   }
+   ObjectDelete(0,ViewName("View_TP_BUY")); ObjectDelete(0,ViewName("View_TP_SELL"));
+   ObjectDelete(0,ViewName("View_Stop_BUY")); ObjectDelete(0,ViewName("View_Stop_SELL"));
 }
 
 void DrawDiagnosticSignal(string module,int side,datetime bar,double price,string detail) {
@@ -3303,7 +3069,7 @@ bool ReadViewIndicator(int handle,int buffer,double &value) {
 }
 
 bool CoveredByHud(int x,int y) {
-   if(x<4 || x>G_HudWidth+20) return false;
+   if(x<G_HudLeft-4 || x>G_HudLeft+G_HudWidth+4) return false;
    return (y>=G_HudTop-4 && y<=G_ScopeY+G_HudRow+4) ||
       (ShowFiboDiagnostics && y>=G_DiagTop-5 && y<=G_DiagBottom+5);
 }
@@ -3322,16 +3088,6 @@ void MaskChartAnnotationsUnderHud() {
       long periods=covered?OBJ_NO_PERIODS:OBJ_ALL_PERIODS;
       if(ObjectGetInteger(0,ViewName(name),OBJPROP_TIMEFRAMES)!=periods)
          ObjectSetInteger(0,ViewName(name),OBJPROP_TIMEFRAMES,periods);
-   }
-}
-
-void PaintStage1Midlines() {
-   if(!BaseUseStopOrders) return;
-   for(int i=0;i<ArraySize(G_BaseViews);i++) {
-      if(G_BaseViews[i].text!="BASE") continue;
-      double middle=(G_BaseViews[i].high+G_BaseViews[i].low)*0.5;
-      CreateStructLine(G_BaseViews[i].name+"_HALF",G_BaseViews[i].first,middle,
-         G_BaseViews[i].last,middle,clrSilver,"BASE 50%");
    }
 }
 
@@ -3364,7 +3120,7 @@ void SF_Clear() { ObjectsDeleteAll(0,ViewName(SF_Prefix)); }
 void SF_Status(string message) {
    G_StructureStatus=message;
    if(!G_PaintFrame) return;
-   if(SF_ShowStatus) SetViewLabel("StructureStatus",message,12,G_DiagBottom+8,clrSilver,8);
+   if(SF_ShowStatus) SetViewLabel("StructureStatus",message,G_HudLeft,G_DiagBottom+8,clrSilver,8);
    else ObjectDelete(0,ViewName("StructureStatus"));
 }
 
@@ -3522,33 +3278,27 @@ void CreateCloseButton() {
 }
 
 void UpdateCenterInfo() {
-   double total_volume=0,total_profit=0;
+   double volume=0,profit=0;
    for(int i=0;i<PositionsTotal();i++) {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket>0 && PositionGetString(POSITION_SYMBOL)==_Symbol) {
-         total_volume+=PositionGetDouble(POSITION_VOLUME);
-         total_profit+=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+      ulong t=PositionGetTicket(i);
+      if(t>0 && PositionGetString(POSITION_SYMBOL)==_Symbol) {
+         volume+=PositionGetDouble(POSITION_VOLUME);
+         profit+=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
       }
    }
-   double pnl=GetDailyPNL();
-   string line1="TIME: "+GetTimerToNextBar()+" | BAL: "+DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2)+
-      " | DAY: "+DoubleToString(pnl,2)+" | Risk: "+DoubleToString(GetDynamicRisk(),1)+"%";
-   string line2="LOTS: "+DoubleToString(total_volume,2)+" | FLOAT: "+DoubleToString(total_profit,2)+
-      " | MACRO OTE (legacy): "+GetActiveMacroOTE(SymbolInfoDouble(_Symbol,SYMBOL_BID))+
-      " | Nearest OB: "+GetNearestOBDistance();
-   int chartWidth=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
-   int margin=MathMin(InfoRightMarginPx,MathMax(0,chartWidth/4));
-   int width=MathMax(40,(chartWidth-24-margin)*InfoWidthPercent/100);
-   int x=MathMax(12,chartWidth-margin-width);
-   color shade=total_profit>=0?clrLime:clrRed;
-   // Two readable rows (each may wrap once), anchored to the right; never shrink to 8pt.
+   string line="TIME "+GetTimerToNextBar()+" | BAL "+DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2)+
+      " | DAY "+DoubleToString(GetDailyPNL(),2)+" | RISK "+DoubleToString(GetDynamicRisk(),1)+"%"+
+      " | LOTS "+DoubleToString(volume,2)+" | FLOAT "+DoubleToString(profit,2)+
+      " | OTE "+GetActiveMacroOTE(SymbolInfoDouble(_Symbol,SYMBOL_BID))+" | OB "+GetNearestOBDistance();
    ClearSegmentedLabel("CenterInfo1"); ClearSegmentedLabel("CenterInfo2");
-   int used=PaintWrappedView("InfoMain",line1,x,G_SummaryY,shade,InfoFontSize,width,2);
-   PaintWrappedView("InfoDetails",line2,x,G_SummaryY+used,shade,InfoFontSize,width,2);
-   SetFittedViewLabel("ScopeInfo","P/L: all magic on symbol; management: own magic only | "+
-      (DiagnosticMode?"DIAGNOSTIC / NO REQUESTS":(G_StopLatched?"STOP LATCHED / ENTRIES BLOCKED":
-      (EnableAutoTrade?"AUTO ENTRY ENABLED (gates apply)":"AUTO ENTRY OFF"))),
-      x,G_ScopeY,clrSilver,MathMax(8,G_HudFont-1),width);
+   for(int i=0;i<8;i++) { ClearSegmentedLabel("InfoMain_"+IntegerToString(i)); ClearSegmentedLabel("InfoDetails_"+IntegerToString(i)); }
+   int size=InfoFontSize;
+   while(size>8 && ViewTextWidth(line,size)>G_HudWidth) size--;
+   // One row only; full values always remain in the tooltip on small charts.
+   SetFittedViewLabel("InfoOneRow",line,G_HudLeft,G_SummaryY,profit>=0?clrLime:clrRed,size,G_HudWidth);
+   SetFittedViewLabel("ScopeInfo","P/L: symbol | management: own Magic | "+
+      (DiagnosticMode?"DIAGNOSTIC":(G_StopLatched?"STOP LATCHED":(EnableAutoTrade?"AUTO ON":"AUTO OFF")))+
+      " | EXIT: M5 WICKS "+IntegerToString(BaseTrailBars)+" / HALF +"+DoubleToString(BaseHalfExitPips,0)+"p / NO TP",G_HudLeft,G_ScopeY,clrSilver,8,G_HudWidth);
 }
 
 void UpdateFiboDiagnostics() {
@@ -3614,7 +3364,7 @@ void UpdateFiboDiagnostics() {
    string lines[9];
    lines[0]=d1; lines[1]=h4; lines[2]=agreement;
    lines[3]=structure; lines[4]=refresh; lines[5]=distance; lines[6]=tradeZone; lines[7]=safety; lines[8]=ReadOnlyAIStatus();
-   int x=12, y=G_DiagTop,row=ViewTextHeight(G_HudFont)+5;
+   int x=G_HudLeft, y=G_DiagTop,row=ViewTextHeight(G_HudFont)+5;
    int room=MathMax(row,(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0)-y-36);
    int starts[10]; starts[0]=0; int pages=1,used=0;
    for(int i=0;i<9;i++) {
@@ -3646,7 +3396,7 @@ void UpdateFiboDiagnostics() {
       string nav="DiagNext";
       if(ObjectFind(0,ViewName(nav))<0) ObjectCreate(0,ViewName(nav),OBJ_BUTTON,0,0,0);
       ObjectSetInteger(0,ViewName(nav),OBJPROP_CORNER,CORNER_LEFT_UPPER);
-      ObjectSetInteger(0,ViewName(nav),OBJPROP_XDISTANCE,12);
+      ObjectSetInteger(0,ViewName(nav),OBJPROP_XDISTANCE,G_HudLeft);
       ObjectSetInteger(0,ViewName(nav),OBJPROP_YDISTANCE,y+2);
       ObjectSetInteger(0,ViewName(nav),OBJPROP_XSIZE,MathMin(240,G_HudWidth));
       ObjectSetInteger(0,ViewName(nav),OBJPROP_YSIZE,28);
@@ -3662,7 +3412,7 @@ void UpdateFiboDiagnostics() {
 void UpdateDashboardMTF() {
    if(!ShowMTFDashboard) { ObjectsDeleteAll(0,ViewName("DB_")); return; }
    double price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   int column=G_HudWidth/G_HudColumns,font=G_HudFont;
+   int column=MathMin(G_HudWidth/G_HudColumns,ViewTextWidth("H4 DIAMOND RSI 100.0 DN",G_HudFont)+8),font=G_HudFont;
    for(int i=0;i<6;i++) {
       bool history=SeriesInfoInteger(_Symbol,mtf_tfs[i],SERIES_SYNCHRONIZED) && Bars(_Symbol,mtf_tfs[i])>=101;
       int ih=history?iHighest(_Symbol,mtf_tfs[i],MODE_HIGH,100,1):-1;
@@ -3691,10 +3441,10 @@ void UpdateDashboardMTF() {
       if(ready && rsiOK && emaOK && stochOK && macdOK) G_MTFAuditReady[i]++;
       color rsiColor=!rsiOK?clrSilver:(rsi>=80?clrRed:(rsi<=20?clrLime:clrWhite));
       if(ready && zone=="DIAMOND" && rsiOK) rsiColor=Diamond_Color;
-      string id=IntegerToString(i),tf=mtf_names[i]; int x=12+(i%G_HudColumns)*column;
+      string id=IntegerToString(i),tf=mtf_names[i]; int x=G_HudLeft+G_HudWidth-G_HudColumns*column+(i%G_HudColumns)*column;
       int y=G_HudTop+(i/G_HudColumns)*(G_HudCompact?1:3)*G_HudRow;
       ObjectDelete(0,ViewName("DB_Arr_"+id));
-      SetFittedViewLabel("DB_Txt_"+id,tf+" "+zone+" RSI "+(rsiOK?DoubleToString(rsi,1):"WAIT")+" "+(emaOK?(e21>e55 && e55>e200?"UP":(e21<e55 && e55<e200?"DN":"EQ")):"?"),x,y,rsiColor,font,column-12);
+      SetFittedViewLabel("DB_Txt_"+id,tf+" "+zone+" RSI "+(rsiOK?DoubleToString(rsi,1):"WAIT")+" "+(emaOK?(e21>e55 && e55>e200?"UP":(e21<e55 && e55<e200?"DN":"EQ")):"?"),x,y,rsiColor,font,column-4);
       color stochColor=clrSilver;
       if(stochOK) {
          stochColor=clrWhite;
@@ -3702,16 +3452,16 @@ void UpdateDashboardMTF() {
          else if(sc>85) { stochColor=clrRed; }
       }
       ObjectDelete(0,ViewName("DB_StochArr_"+id));
-      SetFittedViewLabel("DB_Stoch_"+id,tf+" STO "+(stochOK?DoubleToString(sc,0):"WAIT")+" "+(stochOK?(sc>ss?"UP":"DN"):"?"),x,y+G_HudRow,stochColor,font,column-12);
+      SetFittedViewLabel("DB_Stoch_"+id,tf+" STO "+(stochOK?DoubleToString(sc,0):"WAIT")+" "+(stochOK?(sc>ss?"UP":"DN"):"?"),x,y+G_HudRow,stochColor,font,column-4);
       color macdColor=!macdOK?clrSilver:(mm>ms?clrLime:(mm<ms?clrRed:clrGray));
       ObjectDelete(0,ViewName("DB_MacdArr_"+id));
-      SetFittedViewLabel("DB_Macd_"+id,tf+" MACD "+(macdOK?DoubleToString(mm,2):"WAIT")+" "+(macdOK?(mm>ms?"UP":"DN"):"?"),x,y+2*G_HudRow,macdColor,font,column-12);
+      SetFittedViewLabel("DB_Macd_"+id,tf+" MACD "+(macdOK?DoubleToString(mm,2):"WAIT")+" "+(macdOK?(mm>ms?"UP":"DN"):"?"),x,y+2*G_HudRow,macdColor,font,column-4);
       if(G_HudCompact) {
          string combined=tf+" "+zone+" RSI "+(rsiOK?DoubleToString(rsi,1):"WAIT")+
             " "+(emaOK?(e21>e55 && e55>e200?"UP":(e21<e55 && e55<e200?"DN":"EQ")):"?")+
             " | STO "+(stochOK?DoubleToString(sc,0):"WAIT")+" "+(stochOK?(sc>ss?"UP":"DN"):"?")+
             " | MACD "+(macdOK?DoubleToString(mm,2):"WAIT")+" "+(macdOK?(mm>ms?"UP":"DN"):"?");
-         SetFittedViewLabel("DB_Txt_"+id,combined,x,y,rsiColor,font,column-12);
+         SetFittedViewLabel("DB_Txt_"+id,combined,x,y,rsiColor,font,column-4);
          ClearSegmentedLabel("DB_Stoch_"+id); ClearSegmentedLabel("DB_Macd_"+id);
       }
    }

@@ -1,0 +1,142 @@
+[
+  {
+    "run": 1,
+    "build": "Sniper_Manager_v3_6_5_BASE_ATR_v2",
+    "deposit": 100.0,
+    "modules": {
+      "SMC_Comp": {
+        "entries": 15,
+        "exit_deals": 15,
+        "wins": 11,
+        "losses": 4,
+        "net": 25.14
+      }
+    }
+  },
+  {
+    "run": 2,
+    "build": "Sniper_Manager_v3_6_5_BASE_ATR_v2",
+    "deposit": 100.0,
+    "modules": {
+      "SMC_Comp": {
+        "entries": 12,
+        "exit_deals": 12,
+        "wins": 8,
+        "losses": 4,
+        "net": 23.96
+      }
+    }
+  },
+  {
+    "run": 3,
+    "build": "Sniper_Manager_v3_6_5_BASE_DETECT_2",
+    "deposit": 100.0,
+    "modules": {
+      "SMC_Comp": {
+        "entries": 6,
+        "exit_deals": 6,
+        "wins": 4,
+        "losses": 2,
+        "net": 11.94
+      }
+    }
+  },
+  {
+    "run": 4,
+    "build": "Sniper_Manager_v3_6_5_BASE_DETECT_2",
+    "deposit": 500.0,
+    "modules": {
+      "SMC_Comp": {
+        "entries": 3,
+        "exit_deals": 3,
+        "wins": 2,
+        "losses": 1,
+        "net": 37.85
+      },
+      "SMC_Base_Stop_B": {
+        "entries": 1,
+        "exit_deals": 1,
+        "wins": 1,
+        "losses": 0,
+        "net": 0.51
+      }
+    }
+  },
+  {
+    "run": 5,
+    "build": "Sniper_Manager_v3_6_5_RESTORED_STOP_FIX",
+    "deposit": 500.0,
+    "modules": {
+      "SMC_Comp": {
+        "entries": 126,
+        "exit_deals": 126,
+        "wins": 69,
+        "losses": 57,
+        "net": 19.94
+      },
+      "SMC_Base_Stop_B": {
+        "entries": 27,
+        "exit_deals": 27,
+        "wins": 19,
+        "losses": 8,
+        "net": -19.37
+      },
+      "SMC_Comp_Limit": {
+        "entries": 5,
+        "exit_deals": 5,
+        "wins": 3,
+        "losses": 2,
+        "net": 1.87
+      },
+      "SMC_Base_Stop_S": {
+        "entries": 14,
+        "exit_deals": 14,
+        "wins": 14,
+        "losses": 0,
+        "net": 23.99
+      },
+      "SMC_Sweep": {
+        "entries": 2,
+        "exit_deals": 2,
+        "wins": 0,
+        "losses": 2,
+        "net": -31.08
+      }
+    }
+  },
+  {
+    "run": 6,
+    "build": "Sniper_Manager_v3_6_5_STAGE1_BASE_65_35",
+    "deposit": 500.0,
+    "modules": {
+      "SMC_Comp": {
+        "entries": 110,
+        "exit_deals": 110,
+        "wins": 57,
+        "losses": 53,
+        "net": -74.08
+      },
+      "SMC_S35": {
+        "entries": 2,
+        "exit_deals": 2,
+        "wins": 1,
+        "losses": 1,
+        "net": 1.54
+      },
+      "SMC_Comp_Limit": {
+        "entries": 6,
+        "exit_deals": 6,
+        "wins": 3,
+        "losses": 3,
+        "net": -8.51
+      },
+      "SMC_Sweep": {
+        "entries": 2,
+        "exit_deals": 2,
+        "wins": 0,
+        "losses": 2,
+        "net": -31.08
+      }
+    }
+  }
+]
