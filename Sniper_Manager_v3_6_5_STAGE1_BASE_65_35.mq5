@@ -1604,7 +1604,7 @@ void CheckBaseStopSetup() {
             if(volumeOK) {
                G_BaseHigh=high; G_BaseLow=low; G_BaseStarted=first; G_BaseConsumed=false;
                G_BaseStageReady=true; G_BaseStopOCOTripped=false; G_BaseStageAttempt=0;
-               G_BaseStageDeadline=now+(long)BaseMaxWaitBars*PeriodSeconds(_Period);
+               G_BaseStageDeadline=(datetime)((long)now+(long)BaseMaxWaitBars*PeriodSeconds(_Period));
                Print("SN365 FIX2 BASE ARM | first=",TimeToString(first)," | bars=8 | low=",low," | high=",high);
             }
          }
@@ -2330,7 +2330,7 @@ bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,st
    request.type_time=ORDER_TIME_GTC; request.expiration=0; request.deviation=10;
    if(baseStop && (SymbolInfoInteger(_Symbol,SYMBOL_EXPIRATION_MODE) & SYMBOL_EXPIRATION_SPECIFIED)!=0) {
       request.type_time=ORDER_TIME_SPECIFIED;
-      request.expiration=TimeCurrent()+(long)BaseMaxWaitBars*PeriodSeconds(_Period);
+      request.expiration=(datetime)((long)TimeCurrent()+(long)BaseMaxWaitBars*PeriodSeconds(_Period));
    }
    long modes=SymbolInfoInteger(_Symbol,SYMBOL_FILLING_MODE);
    if(pending) request.type_filling=ORDER_FILLING_RETURN;
