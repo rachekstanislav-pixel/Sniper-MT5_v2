@@ -22,7 +22,7 @@ h=h[:a]+'''int lastSide=-1;double lastSL=0,lastATR=0;
 bool SubmitEntry(int side,bool,double,double sl,string,double atr){attempts++;if(!gate)return false;successful++;lastSide=side;lastSL=sl;lastATR=atr;return true;}
 '''+h[b:]
 h+=r'''
-bool BaseUseStopOrders=false;void CheckBaseStopSetup(){assert(false);}
+void CheckBaseStopSetup(){assert(false);}
 #include <sstream>
 constexpr int AUDIT_BASE=4,clrDarkGray=0;
 bool G_BaseArmed=false,G_BaseConsumed=false,EnableSMC_Base=true,BaseRequireVolumeSpike=false;

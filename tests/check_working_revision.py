@@ -21,7 +21,7 @@ for name in unchanged:
 # BASE stop placements now obey cooldown, unlike the paired compression limit.
 policy=function(s,'EntryPolicy').replace('(!pending || IsBaseStopModule(comment))','!pending')
 assert policy==function(base,'EntryPolicy'), 'Unexpected change outside the new BASE pending cooldown guard'
-functions='\n'.join(function(s,n) for n in ['DirectionAllowed','SafeVolume','CheckCompressionPhase'])
+functions='\n'.join(function(s,n) for n in ['IsBaseStopModule','DirectionAllowed','SafeVolume','CheckCompressionPhase'])
 functions=functions.replace('double atr_val[], atr_ma_val[];', 'std::vector<double> atr_val, atr_ma_val;')
 harness=r'''
 #include <algorithm>
@@ -33,6 +33,8 @@ harness=r'''
 #include <limits>
 using string=std::string;
 using datetime=long long;
+int StringFind(string text,string sub){auto p=text.find(sub);return p==string::npos?-1:(int)p;}
+bool BaseUseStopOrders=false,BaseStopBothDirections=true;
 constexpr int POSITION_TYPE_BUY=0,POSITION_TYPE_SELL=1,PERIOD_M15=15;
 constexpr int SYMBOL_ASK=1,SYMBOL_BID=2,SERIES_SYNCHRONIZED=3,MODE_HIGH=4,MODE_LOW=5;
 constexpr int SYMBOL_VOLUME_STEP=6,SYMBOL_VOLUME_MIN=7,SYMBOL_VOLUME_MAX=8,SYMBOL_TRADE_TICK_SIZE=9,SYMBOL_TRADE_TICK_VALUE_LOSS=10,ACCOUNT_BALANCE=11;
@@ -115,6 +117,17 @@ int main(){
  G_OTEReclaimSignalBar=98;assert(!DirectionAllowed(POSITION_TYPE_BUY,why,"SMC_OTE_Reclaim"));G_OTEReclaimSignalBar=99;
  G_D1_DataReady=false;assert(!DirectionAllowed(POSITION_TYPE_BUY,why,"SMC_OTE_Reclaim"));G_D1_DataReady=true;
  G_D1_Direction=-1;assert(!DirectionAllowed(POSITION_TYPE_BUY,why,"SMC_OTE_Reclaim"));G_D1_Direction=1;
+ // Two-sided BASE exception is scoped and retains all market-data prerequisites.
+ BaseUseStopOrders=true;BaseStopBothDirections=true;G_D1_Direction=1;SF_ConfirmedDirection=-1;
+ assert(DirectionAllowed(POSITION_TYPE_BUY,why,"SMC_Base_Stop_B:1"));
+ assert(DirectionAllowed(POSITION_TYPE_SELL,why,"SMC_Base_Stop_S:1"));
+ D1_RequireDirectionForEntries=true;assert(DirectionAllowed(POSITION_TYPE_SELL,why,"SMC_Base_Stop_S:1"));D1_RequireDirectionForEntries=false;
+ assert(!DirectionAllowed(POSITION_TYPE_BUY,why,"SMC_Comp"));
+ G_D1_Valid=false;assert(!DirectionAllowed(POSITION_TYPE_BUY,why,"SMC_Base_Stop_B:1"));G_D1_Valid=true;
+ structureOK=false;assert(!DirectionAllowed(POSITION_TYPE_SELL,why,"SMC_Base_Stop_S:1"));structureOK=true;
+ G_D1_DataReady=false;assert(!DirectionAllowed(POSITION_TYPE_BUY,why,"SMC_Base_Stop_B:1"));G_D1_DataReady=true;
+ BaseStopBothDirections=false;assert(!DirectionAllowed(POSITION_TYPE_BUY,why,"SMC_Base_Stop_B:1"));
+ BaseUseStopOrders=false;BaseStopBothDirections=true;
  // Actual unchanged lot sizing: half cash budget, no forced minimum above budget.
  double volume=0;assert(SafeVolume(0,110,100,volume,1.0));assert(std::abs(volume-0.02)<1e-9);
  assert(SafeVolume(0,110,100,volume,0.5));assert(std::abs(volume-0.01)<1e-9);

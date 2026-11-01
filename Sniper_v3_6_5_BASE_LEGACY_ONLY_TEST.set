@@ -102,3 +102,6 @@ BaseTargetScope=3
 
 ; A/B control: original 8-bar / 1.5 ATR detector
 BaseAdaptiveDetection=false
+
+; Two-sided BASE breakout: preserve data, margin and cash-risk protection
+BaseStopBothDirections=true

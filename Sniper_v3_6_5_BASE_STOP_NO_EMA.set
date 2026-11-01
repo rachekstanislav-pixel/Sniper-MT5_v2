@@ -102,3 +102,6 @@ OTEReclaimMaxDistanceATR=0.5
 ; BASE pending breakout: Buy Stop / Sell Stop; closest confirmed H1/H4 target
 BaseUseStopOrders=true
 BaseTargetScope=3
+
+; Two-sided BASE breakout: preserve data, margin and cash-risk protection
+BaseStopBothDirections=true

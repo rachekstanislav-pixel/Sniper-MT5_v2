@@ -95,3 +95,6 @@ BaseSwingStrength=2
 BaseSwingLookback=64
 BaseSLBufferPoints=15
 BaseMaxWaitBars=10
+
+; Preserve this preset's original market / ATR mode; source defaults now use Stop orders
+BaseUseStopOrders=false

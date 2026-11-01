@@ -22,11 +22,12 @@ const int SYMBOL_ORDER_STOP=4,SYMBOL_ORDER_STOP_LIMIT=8,SYMBOL_EXPIRATION_SPECIF
 const int ACCOUNT_BALANCE=1,ACCOUNT_MARGIN_FREE=2,TRADE_ACTION_PENDING=1,TRADE_ACTION_DEAL=2,ORDER_TIME_GTC=0,ORDER_TIME_SPECIFIED=2;
 const int ORDER_FILLING_RETURN=2,ORDER_FILLING_FOK=0,ORDER_FILLING_IOC=1,SYMBOL_FILLING_FOK=1,SYMBOL_FILLING_IOC=2,SYMBOL_TRADE_EXECUTION_MARKET=2,TRADE_RETCODE_DONE=10009;
 int _Symbol=0,_Digits=2,_Period=5,BaseStopLimitOffsetPoints=15,BaseMaxWaitBars=10;
-ulong MagicNumber=123;double _Point=.01;bool G_ExecutionUncertain=false,G_StateOK=true,AllowD1OTEAgainstH4=false,AllowOTEReclaimAgainstH4=true;
+ulong MagicNumber=123;double _Point=.01;bool G_ExecutionUncertain=false,G_StateOK=true,BaseStopBothDirections=true,AllowD1OTEAgainstH4=false,AllowOTEReclaimAgainstH4=true;
 int SF_ConfirmedDirection=1;double CounterTrendRiskMult=.5;datetime G_EntryRetryAfter=0,G_LastBuyTime=0,G_LastSellTime=0;
 int StringFind(string text,string sub){auto p=text.find(sub);return p==string::npos?-1:(int)p;}
 bool MathIsValidNumber(double x){return std::isfinite(x);}
 bool Positive(double x){return std::isfinite(x)&&x>0;}double MathCeil(double x){return std::ceil(x);}double MathFloor(double x){return std::floor(x);}double MathRound(double x){return std::round(x);}
+double MathMin(double a,double b){return std::min(a,b);}
 double MathAbs(double x){return std::abs(x);}double MathMax(double a,double b){return std::max(a,b);}
 double NormalizeDouble(double x,int d){double p=std::pow(10,d);return std::round(x*p)/p;}
 template<typename T>int ArraySize(const std::vector<T>& a){return (int)a.size();}
@@ -34,6 +35,7 @@ struct MqlRates{double high,low;};
 struct MqlTick{double bid,ask;};
 struct MqlTradeRequest{int action=0,type=0,symbol=0,type_time=0,type_filling=0,deviation=0;ulong magic=0;double volume=0,price=0,sl=0,tp=0,stoplimit=0;string comment;datetime expiration=0;};
 struct MqlTradeCheckResult{int retcode=0;};
+double balanceValue=1000;
 MqlTradeRequest checked,sent;double quoteBid=104,quoteAsk=105,riskBefore=0,buyBefore=0,sellBefore=0,marginBefore=0;
 long allowedModes=SYMBOL_ORDER_STOP|SYMBOL_ORDER_STOP_LIMIT;bool policy=true,checkOK=true,sendOK=true,visible=true,canSave=true,exposureOK=true;
 int saves=0,network=0;string reason;
@@ -48,7 +50,7 @@ void SafetyLog(string s){reason=s;}
 bool SafeVolume(int,double,double,double& v,double mult){v=.1*mult;return true;}
 bool OwnExposure(double& risk,double& bv,double& sv,double& margin){risk=riskBefore;bv=buyBefore;sv=sellBefore;margin=marginBefore;return exposureOK;}
 bool LossAtSL(int,double vol,double entry,double sl,double& loss){loss=vol*std::abs(entry-sl)*10;return true;}
-double AccountInfoDouble(int prop){return prop==ACCOUNT_BALANCE?1000:500;}
+double AccountInfoDouble(int prop){return prop==ACCOUNT_BALANCE?balanceValue:500;}
 double GetDynamicGlobalRisk(){return 5;}
 bool OrderCalcMargin(int,int,double v,double,double& m){m=v*100;return true;}
 bool OrderCheck(const MqlTradeRequest& r,MqlTradeCheckResult& check){checked=r;check.retcode=0;return checkOK;}
@@ -72,7 +74,7 @@ struct Trade{
 }trade;
 void fixture(){
  G_ExecutionUncertain=false;G_StateOK=true;G_EntryRetryAfter=0;saves=network=0;checked={};sent={};reason="";
- quoteBid=104;quoteAsk=105;riskBefore=buyBefore=sellBefore=marginBefore=0;
+ balanceValue=1000;quoteBid=104;quoteAsk=105;riskBefore=buyBefore=sellBefore=marginBefore=0;
  policy=checkOK=sendOK=visible=canSave=exposureOK=true;allowedModes=SYMBOL_ORDER_STOP|SYMBOL_ORDER_STOP_LIMIT;
 }
 '''
@@ -96,6 +98,8 @@ int main(){
  fixture();visible=false;assert(!SubmitEntry(0,true,110,100,"SMC_Base_Stop_B:100",0,1,120) && network==1 && G_ExecutionUncertain);
  fixture();assert(!SubmitEntry(0,true,110,100,"SMC_Comp_Limit",0,1,120) && network==0); // no module escape
  fixture();assert(!SubmitEntry(0,true,110,100,"SMC_Base_Stop_B:100",0,2,120) && network==0); // unsupported stop-limit mode
+ fixture();balanceValue=118.83;assert(SubmitEntry(0,true,110,100,"SMC_Base_Stop_B:100",0,1,120));assert(sent.volume==.01); // reduce to valid cap, preserve cash risk
+ fixture();buyBefore=.06;assert(SubmitEntry(0,true,110,100,"SMC_Base_Stop_B:100",0,1,120));assert(sent.volume<=.04); // only remaining volume
  // Most recent pivot is 120; nearest by price is older 115. Unconfirmed first/last samples are excluded.
  std::vector<MqlRates> bars={{130,90},{110,95},{120,96},{110,97},{108,94},{115,95},{109,96},{108,97}};
  assert(BaseExtremumTarget(bars,0,1,111,false)==115);

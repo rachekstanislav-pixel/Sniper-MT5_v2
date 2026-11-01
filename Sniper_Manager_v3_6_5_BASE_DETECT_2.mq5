@@ -6,7 +6,7 @@
 //+------------------------------------------------------------------+
 #property strict
 #property version "3.65"
-#property description "3.6.5 BASE ATR / BASE STOP H1-H4 targets + D1 M15 OB reclaim; BASE-STOP-1 / BASE-DETECT-2"
+#property description "3.6.5 BASE ATR / BASE STOP H1-H4 targets + D1 M15 OB reclaim; BASE-STOP-1 / BASE-DETECT-2 / BASE-ORDERS-2"
 #include <Trade\Trade.mqh>
 #include <Canvas\Canvas.mqh>
 
@@ -92,7 +92,8 @@ input double BaseMaxRangeATR = 4.0; // Full range / ATR known BEFORE the candida
 input double BaseMaxEfficiency = 0.35; // Net close movement / total close-to-close path
 input double BaseMinOverlap = 0.55; // Mean overlap of adjacent candle ranges
 input bool BaseDetectionDiagnostics = false; // One result per closed candle, plus one history-warmup message
-input bool BaseUseStopOrders = false; // Alternative to the existing closed-breakout / ATR mode
+input bool BaseUseStopOrders = true; // Default BASE mode: Buy Stop above / Sell Stop below
+input bool BaseStopBothDirections = true; // BASE Stop only: ignore directional H4/D1 filters, retain current/valid data
 enum BASE_TARGET_SCOPE { BASE_TARGET_H1=1, BASE_TARGET_H4=2, BASE_TARGET_H1_H4=3 };
 input BASE_TARGET_SCOPE BaseTargetScope = BASE_TARGET_H1_H4; // Nearest confirmed profitable H1/H4 level
 input bool BaseRequireVolumeSpike = false; // Closed breakout is sufficient; optional old volume filter
@@ -317,7 +318,9 @@ void DeleteOrdersByComment(string comment_str);
 //| INITIALIZATION                                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | BASE STOP / EXTREMUM mode available | build OTE-1+BASE-STOP-1 / BASE-DETECT-2");
+   Print("SN365 BASE ATR + D1 .790 M15 OB RECLAIM | counter-H4 half risk | BASE STOP / EXTREMUM mode available | build OTE-1+BASE-STOP-1 / BASE-DETECT-2 / BASE-ORDERS-2");
+   Print("SN365 BASE CONFIG | stopOrders=",BaseUseStopOrders," | bothDirections=",BaseStopBothDirections,
+      " | adaptive=",BaseAdaptiveDetection," | H4/D1 data + risk gates retained");
    ResetSignalAudit();
    G_VisualEnabled=!MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_VISUAL_MODE);
    InitVisualNamespace();
@@ -1086,12 +1089,17 @@ bool SignalModuleEnabled(string module) {
 
 bool DirectionAllowed(int side,string &why,string module="") {
    if(!G_D1_DataReady) { why="D1 data not synchronized"; return false; }
-   if(D1_RequireDirectionForEntries && (!G_D1_Valid || G_D1_Direction!=(side==POSITION_TYPE_BUY?1:-1))) {
+   bool baseBoth=BaseUseStopOrders && BaseStopBothDirections && IsBaseStopModule(module);
+   if(!baseBoth && D1_RequireDirectionForEntries && (!G_D1_Valid || G_D1_Direction!=(side==POSITION_TYPE_BUY?1:-1))) {
       why="D1 direction/validity"; return false;
    }
    // Market data validity is a safety prerequisite even when direction filters are disabled.
    if(!StructureCurrent()) {
       why="H4 not ready/current"; return false;
+   }
+   if(baseBoth) {
+      if(!G_D1_Valid) { why="BASE Stop requires valid D1 data"; return false; }
+      return true; // Only BASE direction/conflict filters are waived, after H4 data checks.
    }
    if(module=="SMC_OTE_Reclaim" && AllowOTEReclaimAgainstH4) {
       if(!G_D1_Valid || G_D1_Direction!=(side==POSITION_TYPE_BUY?1:-1) ||
@@ -2212,6 +2220,15 @@ bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,st
    }
    double balance=AccountInfoDouble(ACCOUNT_BALANCE),step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
    double cap=MathMax(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),MathFloor((balance/10000.0)/step)*step);
+   if(baseStop && (buy?buyVol:sellVol)+volume>cap+1e-8) {
+      // Reduce the risk-sized volume to the remaining direction cap; never raise a minimum lot to fit.
+      double bounded=NormalizeDouble(MathFloor(MathMax(0,cap-(buy?buyVol:sellVol))/step)*step,8);
+      if(bounded<SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN) || bounded<=0) {
+         SafetyLog(comment+": no remaining volume under direction cap"); return false;
+      }
+      volume=MathMin(volume,bounded);
+      if(!LossAtSL(side,volume,entry,sl,loss)) { SafetyLog(comment+": capped cash risk unavailable"); return false; }
+   }
    if((buy?buyVol:sellVol)+volume>cap+1e-8 || risk+loss>balance*GetDynamicGlobalRisk()/100.0+1e-8) {
       SafetyLog(comment+": projected volume/global cash-risk cap"); return false;
    }
@@ -2238,7 +2255,7 @@ bool SubmitEntry(int side,bool pending,double proposedEntry,double proposedSL,st
       request.type_filling=ORDER_FILLING_RETURN;
    else { SafetyLog(comment+": unsupported filling mode"); return false; }
    if(!OrderCheck(request,check) || (check.retcode!=0 && check.retcode!=TRADE_RETCODE_DONE)) { SafetyLog(comment+": OrderCheck failed code="+IntegerToString(check.retcode)); return false; }
-   Print("SN364 ENTRY | module=",comment," | policy=",counterReclaim?"CONFIRMED_OTE_HALF_RISK":(counterOTE?"D1_OTE_OVERRIDE":"STRICT"),
+   Print("SN364 ENTRY | module=",comment," | policy=",(baseStop && BaseStopBothDirections)?"BASE_TWO_SIDED":counterReclaim?"CONFIRMED_OTE_HALF_RISK":(counterOTE?"D1_OTE_OVERRIDE":"STRICT"),
       " | riskMultiplier=",DoubleToString(riskMultiplier,3)," | sl=",DoubleToString(sl,_Digits),
       " | volume=",DoubleToString(volume,8)," | tp=",DoubleToString(tp,_Digits));
    // Persist uncertain state BEFORE network submission. Crash/timeout cannot silently retry on restart.

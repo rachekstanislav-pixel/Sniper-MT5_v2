@@ -98,3 +98,6 @@ BaseMaxWaitBars=10
 ; D1 .790 + pre-existing H4 OB + closed M15 return
 OTEReclaimMaxBars=4
 OTEReclaimMaxDistanceATR=0.5
+
+; Preserve this preset's original market / ATR mode; source defaults now use Stop orders
+BaseUseStopOrders=false

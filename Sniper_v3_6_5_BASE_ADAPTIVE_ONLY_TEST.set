@@ -108,3 +108,6 @@ BaseMaxRangeATR=4.0
 BaseMaxEfficiency=0.35
 BaseMinOverlap=0.55
 BaseDetectionDiagnostics=true
+
+; Two-sided BASE breakout: preserve data, margin and cash-risk protection
+BaseStopBothDirections=true
